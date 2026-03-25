@@ -9,59 +9,85 @@ pub enum BencodeValue {
     Dict(Vec<(Vec<u8>, BencodeValue)>),
 }
 
-impl BencodeValue {
-    pub fn parse(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
-        match data[*pos] {
-            b'i' => Self::parse_integer(data, pos),
-            b'l' => Self::parse_list(data, pos),
-            b'd' => Self::parse_dict(data, pos),
-            b'0'..=b'9' => Self::parse_bytes(data, pos),
-            b => Err(BencodeError::UnexpectedByte(*pos, b)),
+#[derive(Debug)]
+pub struct Parser<'a> {
+    data: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, cursor: 0 }
+    }
+
+    pub fn parse(&mut self) -> Result<BencodeValue, BencodeError> {
+        match self.peek()? {
+            b'i' => self.parse_integer(),
+            b'l' => self.parse_list(),
+            b'd' => self.parse_dict(),
+            b'0'..=b'9' => self.parse_bytes(),
+            b => Err(BencodeError::UnexpectedByte(self.cursor, b)),
         }
     }
 
-    fn parse_integer(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
-        *pos += 1;
-        let end = memchr(b'e', &data[*pos..]).ok_or(BencodeError::UnexpectedEof)?;
-        let s = std::str::from_utf8(&data[*pos..*pos + end])?;
+    pub fn raw_span(&self, start: usize) -> &'a [u8] {
+        &self.data[start..self.cursor]
+    }
+
+    pub fn position(&self) -> usize {
+        self.cursor
+    }
+
+    fn peek(&self) -> Result<u8, BencodeError> {
+        self.data.get(self.cursor).copied().ok_or(BencodeError::UnexpectedEof)
+    }
+
+    fn peek_slice(&self, len: usize) -> Result<&'a [u8], BencodeError> {
+        self.data.get(self.cursor..self.cursor + len).ok_or(BencodeError::UnexpectedEof)
+    }
+
+    fn parse_integer(&mut self) -> Result<BencodeValue, BencodeError> {
+        self.cursor += 1;
+        let end = memchr(b'e', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
+        let s = std::str::from_utf8(&self.data[self.cursor..self.cursor + end])?;
         let i = s.parse::<i64>()?;
-        *pos += end + 1;
-        Ok(Self::Int(i))
+        self.cursor += end + 1;
+        Ok(BencodeValue::Int(i))
     }
 
-    fn parse_bytes(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
-        let colon = memchr(b':', &data[*pos..]).ok_or(BencodeError::UnexpectedEof)?;
-        let len = std::str::from_utf8(&data[*pos..*pos + colon])?;
+    fn parse_bytes(&mut self) -> Result<BencodeValue, BencodeError> {
+        let colon = memchr(b':', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
+        let len = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
         let len = len.parse::<usize>()?;
-        *pos += colon + 1;
-        let bytes = data[*pos..*pos + len].to_vec();
-        *pos += len;
-        Ok(Self::Bytes(bytes))
+        self.cursor += colon + 1;
+        let bytes = self.peek_slice(len)?.to_vec();
+        self.cursor += len;
+        Ok(BencodeValue::Bytes(bytes))
     }
 
-    fn parse_list(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
-        *pos += 1;
+    fn parse_list(&mut self) -> Result<BencodeValue, BencodeError> {
+        self.cursor += 1;
         let mut list = vec![];
-        while data[*pos] != b'e' {
-            let item = Self::parse(data, pos)?;
+        while self.peek()? != b'e' {
+            let item = self.parse()?;
             list.push(item);
         }
-        *pos += 1;
+        self.cursor += 1;
         Ok(BencodeValue::List(list))
     }
 
-    fn parse_dict(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
-        *pos += 1;
+    fn parse_dict(&mut self) -> Result<BencodeValue, BencodeError> {
+        self.cursor += 1;
         let mut pairs = vec![];
-        while data[*pos] != b'e' {
-            let key = match Self::parse(data, pos)? {
+        while self.peek()? != b'e' {
+            let key = match self.parse()? {
                 BencodeValue::Bytes(b) => b,
                 _ => return Err(BencodeError::NonStringKey),
             };
-            let value = Self::parse(data, pos)?;
+            let value = self.parse()?;
             pairs.push((key, value));
         }
-        *pos += 1;
+        self.cursor += 1;
         Ok(BencodeValue::Dict(pairs))
     }
 }
