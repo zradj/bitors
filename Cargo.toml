@@ -6,3 +6,5 @@ license = "MIT OR Apache-2.0"
 description = "A Rust BitTorrent client (in the making)"
 
 [dependencies]
+memchr = "2.8.0"
+thiserror = "2.0.18"
