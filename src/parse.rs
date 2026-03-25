@@ -10,7 +10,7 @@ pub enum BencodeValue {
 }
 
 impl BencodeValue {
-    pub fn parse(data: &[u8], pos: &mut usize) -> Result<BencodeValue, BencodeError> {
+    pub fn parse(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
         match data[*pos] {
             b'i' => Self::parse_integer(data, pos),
             b'l' => Self::parse_list(data, pos),
@@ -20,7 +20,7 @@ impl BencodeValue {
         }
     }
 
-    fn parse_integer(data: &[u8], pos: &mut usize) -> Result<BencodeValue, BencodeError> {
+    fn parse_integer(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
         *pos += 1;
         let end = memchr(b'e', &data[*pos..]).ok_or(BencodeError::UnexpectedEof)?;
         let s = std::str::from_utf8(&data[*pos..*pos + end])?;
@@ -29,7 +29,7 @@ impl BencodeValue {
         Ok(Self::Int(i))
     }
 
-    fn parse_bytes(data: &[u8], pos: &mut usize) -> Result<BencodeValue, BencodeError> {
+    fn parse_bytes(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
         let colon = memchr(b':', &data[*pos..]).ok_or(BencodeError::UnexpectedEof)?;
         let len = std::str::from_utf8(&data[*pos..*pos + colon])?;
         let len = len.parse::<usize>()?;
@@ -39,7 +39,7 @@ impl BencodeValue {
         Ok(Self::Bytes(bytes))
     }
 
-    fn parse_list(data: &[u8], pos: &mut usize) -> Result<BencodeValue, BencodeError> {
+    fn parse_list(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
         *pos += 1;
         let mut list = vec![];
         while data[*pos] != b'e' {
@@ -50,7 +50,7 @@ impl BencodeValue {
         Ok(BencodeValue::List(list))
     }
 
-    fn parse_dict(data: &[u8], pos: &mut usize) -> Result<BencodeValue, BencodeError> {
+    fn parse_dict(data: &[u8], pos: &mut usize) -> Result<Self, BencodeError> {
         *pos += 1;
         let mut pairs = vec![];
         while data[*pos] != b'e' {
