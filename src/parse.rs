@@ -116,6 +116,6 @@ pub enum BencodeError {
     UnexpectedByte(usize, u8),
     #[error("Unexpected EOF")]
     UnexpectedEof,
-    #[error("Keys of bencode dictionaries must be strings")]
+    #[error("Keys of Bencode dictionaries must be strings")]
     NonStringKey,
 }
