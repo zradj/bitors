@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use memchr::memchr;
 use thiserror::Error;
 
@@ -6,7 +8,7 @@ pub enum BencodeValue<'a> {
     Int(i64),
     Bytes(&'a [u8]),
     List(Vec<BencodeValue<'a>>),
-    Dict(Vec<(&'a [u8], BencodeValue<'a>)>),
+    Dict(BTreeMap<&'a [u8], BencodeValue<'a>>),
 }
 
 #[derive(Debug)]
@@ -55,6 +57,11 @@ impl<'a> Parser<'a> {
         self.cursor += 1;
         let end = memchr(b'e', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
         let s = std::str::from_utf8(&self.data[self.cursor..self.cursor + end])?;
+
+        if s.starts_with("-0") || (s.starts_with('0') && s.len() > 1) {
+            return Err(BencodeError::InvalidBencodeInteger(s.to_string()));
+        }
+
         let i = s.parse::<i64>()?;
         self.cursor += end + 1;
         Ok(BencodeValue::Int(i))
@@ -62,8 +69,8 @@ impl<'a> Parser<'a> {
 
     fn parse_bytes(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         let colon = memchr(b':', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
-        let len = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
-        let len = len.parse::<usize>()?;
+        let len_str = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
+        let len = len_str.parse::<usize>()?;
         self.cursor += colon + 1;
         let bytes = self.peek_slice(len)?;
         self.cursor += len;
@@ -83,17 +90,17 @@ impl<'a> Parser<'a> {
 
     fn parse_dict(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         self.cursor += 1;
-        let mut pairs = vec![];
+        let mut map = BTreeMap::new();
         while self.peek()? != b'e' {
             let key = match self.parse()? {
                 BencodeValue::Bytes(b) => b,
                 _ => return Err(BencodeError::NonStringKey),
             };
             let value = self.parse()?;
-            pairs.push((key, value));
+            map.insert(key, value);
         }
         self.cursor += 1;
-        Ok(BencodeValue::Dict(pairs))
+        Ok(BencodeValue::Dict(map))
     }
 }
 
@@ -103,6 +110,8 @@ pub enum BencodeError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("Integer parsing error: {0}")]
     InvalidInteger(#[from] std::num::ParseIntError),
+    #[error("Invalid Bencode integer representation: {0}")]
+    InvalidBencodeInteger(String),
     #[error("Unexpected byte at position {0}: {1}")]
     UnexpectedByte(usize, u8),
     #[error("Unexpected EOF")]
