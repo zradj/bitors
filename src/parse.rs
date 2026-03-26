@@ -2,11 +2,11 @@ use memchr::memchr;
 use thiserror::Error;
 
 #[derive(Debug)]
-pub enum BencodeValue {
+pub enum BencodeValue<'a> {
     Int(i64),
-    Bytes(Vec<u8>),
-    List(Vec<BencodeValue>),
-    Dict(Vec<(Vec<u8>, BencodeValue)>),
+    Bytes(&'a [u8]),
+    List(Vec<BencodeValue<'a>>),
+    Dict(Vec<(&'a [u8], BencodeValue<'a>)>),
 }
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ impl<'a> Parser<'a> {
         Self { data, cursor: 0 }
     }
 
-    pub fn parse(&mut self) -> Result<BencodeValue, BencodeError> {
+    pub fn parse(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         match self.peek()? {
             b'i' => self.parse_integer(),
             b'l' => self.parse_list(),
@@ -39,14 +39,19 @@ impl<'a> Parser<'a> {
     }
 
     fn peek(&self) -> Result<u8, BencodeError> {
-        self.data.get(self.cursor).copied().ok_or(BencodeError::UnexpectedEof)
+        self.data
+            .get(self.cursor)
+            .copied()
+            .ok_or(BencodeError::UnexpectedEof)
     }
 
     fn peek_slice(&self, len: usize) -> Result<&'a [u8], BencodeError> {
-        self.data.get(self.cursor..self.cursor + len).ok_or(BencodeError::UnexpectedEof)
+        self.data
+            .get(self.cursor..self.cursor + len)
+            .ok_or(BencodeError::UnexpectedEof)
     }
 
-    fn parse_integer(&mut self) -> Result<BencodeValue, BencodeError> {
+    fn parse_integer(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         self.cursor += 1;
         let end = memchr(b'e', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
         let s = std::str::from_utf8(&self.data[self.cursor..self.cursor + end])?;
@@ -55,17 +60,17 @@ impl<'a> Parser<'a> {
         Ok(BencodeValue::Int(i))
     }
 
-    fn parse_bytes(&mut self) -> Result<BencodeValue, BencodeError> {
+    fn parse_bytes(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         let colon = memchr(b':', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
         let len = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
         let len = len.parse::<usize>()?;
         self.cursor += colon + 1;
-        let bytes = self.peek_slice(len)?.to_vec();
+        let bytes = self.peek_slice(len)?;
         self.cursor += len;
         Ok(BencodeValue::Bytes(bytes))
     }
 
-    fn parse_list(&mut self) -> Result<BencodeValue, BencodeError> {
+    fn parse_list(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         self.cursor += 1;
         let mut list = vec![];
         while self.peek()? != b'e' {
@@ -76,7 +81,7 @@ impl<'a> Parser<'a> {
         Ok(BencodeValue::List(list))
     }
 
-    fn parse_dict(&mut self) -> Result<BencodeValue, BencodeError> {
+    fn parse_dict(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         self.cursor += 1;
         let mut pairs = vec![];
         while self.peek()? != b'e' {
