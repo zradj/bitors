@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use memchr::memchr;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -55,7 +54,10 @@ impl<'a> Parser<'a> {
 
     fn parse_integer(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
         self.cursor += 1;
-        let end = memchr(b'e', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
+        let end = self.data[self.cursor..]
+            .iter()
+            .position(|&b| b == b'e')
+            .ok_or(BencodeError::UnexpectedEof)?;
         let s = std::str::from_utf8(&self.data[self.cursor..self.cursor + end])?;
 
         if s.starts_with("-0") || (s.starts_with('0') && s.len() > 1) {
@@ -68,7 +70,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_bytes(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
-        let colon = memchr(b':', &self.data[self.cursor..]).ok_or(BencodeError::UnexpectedEof)?;
+        let colon = self.data[self.cursor..]
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or(BencodeError::UnexpectedEof)?;
         let len_str = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
         let len = len_str.parse::<usize>()?;
         self.cursor += colon + 1;
