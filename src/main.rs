@@ -1,6 +1,6 @@
 use std::{fs::File, io::Read};
 
-use bitors::{error::Error, parse::Parser};
+use bitors::{error::Error, bencode::Parser};
 
 fn main() -> Result<(), Error> {
     let mut f = File::open("test.torrent").expect("file should open");

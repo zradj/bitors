@@ -1,3 +1,3 @@
 pub mod error;
-pub mod parse;
+pub mod bencode;
 pub mod torrent;

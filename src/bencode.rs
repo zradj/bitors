@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug)]
-pub enum BencodeValue<'a> {
+pub enum Bencode<'a> {
     Int(i64),
     Bytes(&'a [u8]),
-    List(Vec<BencodeValue<'a>>),
-    Dict(BTreeMap<&'a [u8], BencodeValue<'a>>),
+    List(Vec<Bencode<'a>>),
+    Dict(BTreeMap<&'a [u8], Bencode<'a>>),
 }
 
 #[derive(Debug)]
@@ -21,13 +21,13 @@ impl<'a> Parser<'a> {
         Self { data, cursor: 0 }
     }
 
-    pub fn parse(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
+    pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
         match self.peek()? {
             b'i' => self.parse_integer(),
             b'l' => self.parse_list(),
             b'd' => self.parse_dict(),
             b'0'..=b'9' => self.parse_bytes(),
-            b => Err(BencodeError::UnexpectedByte(self.cursor, b)),
+            b => Err(Error::UnexpectedByte(self.cursor, b)),
         }
     }
 
@@ -39,50 +39,50 @@ impl<'a> Parser<'a> {
         self.cursor
     }
 
-    fn peek(&self) -> Result<u8, BencodeError> {
+    fn peek(&self) -> Result<u8, Error> {
         self.data
             .get(self.cursor)
             .copied()
-            .ok_or(BencodeError::UnexpectedEof)
+            .ok_or(Error::UnexpectedEof)
     }
 
-    fn peek_slice(&self, len: usize) -> Result<&'a [u8], BencodeError> {
+    fn peek_slice(&self, len: usize) -> Result<&'a [u8], Error> {
         self.data
             .get(self.cursor..self.cursor + len)
-            .ok_or(BencodeError::UnexpectedEof)
+            .ok_or(Error::UnexpectedEof)
     }
 
-    fn parse_integer(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
+    fn parse_integer(&mut self) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let end = self.data[self.cursor..]
             .iter()
             .position(|&b| b == b'e')
-            .ok_or(BencodeError::UnexpectedEof)?;
+            .ok_or(Error::UnexpectedEof)?;
         let s = std::str::from_utf8(&self.data[self.cursor..self.cursor + end])?;
 
         if s.starts_with("-0") || (s.starts_with('0') && s.len() > 1) {
-            return Err(BencodeError::InvalidBencodeInteger(s.to_string()));
+            return Err(Error::InvalidBencodeInteger(s.to_string()));
         }
 
         let i = s.parse::<i64>()?;
         self.cursor += end + 1;
-        Ok(BencodeValue::Int(i))
+        Ok(Bencode::Int(i))
     }
 
-    fn parse_bytes(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
+    fn parse_bytes(&mut self) -> Result<Bencode<'a>, Error> {
         let colon = self.data[self.cursor..]
             .iter()
             .position(|&b| b == b':')
-            .ok_or(BencodeError::UnexpectedEof)?;
+            .ok_or(Error::UnexpectedEof)?;
         let len_str = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
         let len = len_str.parse::<usize>()?;
         self.cursor += colon + 1;
         let bytes = self.peek_slice(len)?;
         self.cursor += len;
-        Ok(BencodeValue::Bytes(bytes))
+        Ok(Bencode::Bytes(bytes))
     }
 
-    fn parse_list(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
+    fn parse_list(&mut self) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut list = vec![];
         while self.peek()? != b'e' {
@@ -90,27 +90,27 @@ impl<'a> Parser<'a> {
             list.push(item);
         }
         self.cursor += 1;
-        Ok(BencodeValue::List(list))
+        Ok(Bencode::List(list))
     }
 
-    fn parse_dict(&mut self) -> Result<BencodeValue<'a>, BencodeError> {
+    fn parse_dict(&mut self) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut map = BTreeMap::new();
         while self.peek()? != b'e' {
             let key = match self.parse()? {
-                BencodeValue::Bytes(b) => b,
-                _ => return Err(BencodeError::NonStringKey),
+                Bencode::Bytes(b) => b,
+                _ => return Err(Error::NonStringKey),
             };
             let value = self.parse()?;
             map.insert(key, value);
         }
         self.cursor += 1;
-        Ok(BencodeValue::Dict(map))
+        Ok(Bencode::Dict(map))
     }
 }
 
 #[derive(Debug, Error)]
-pub enum BencodeError {
+pub enum Error {
     #[error("UTF-8 error: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("Integer parsing error: {0}")]
