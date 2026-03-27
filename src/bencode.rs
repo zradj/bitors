@@ -10,6 +10,36 @@ pub enum Bencode<'a> {
     Dict(BTreeMap<&'a [u8], Bencode<'a>>),
 }
 
+impl<'a> Bencode<'a> {
+    pub fn as_int(&self) -> Result<i64, Error> {
+        match self {
+            Bencode::Int(i) => Ok(*i),
+            _ => Err(Error::WrongType { expected: "int" }),
+        }
+    }
+
+    pub fn as_bytes(&self) -> Result<&'a [u8], Error> {
+        match self {
+            Bencode::Bytes(b) => Ok(b),
+            _ => Err(Error::WrongType { expected: "bytes" }),
+        }
+    }
+
+    pub fn as_list(&self) -> Result<&Vec<Bencode<'a>>, Error> {
+        match self {
+            Bencode::List(l) => Ok(l),
+            _ => Err(Error::WrongType { expected: "list" }),
+        }
+    }
+
+    pub fn as_dict(&self) -> Result<&BTreeMap<&'a [u8], Bencode<'a>>, Error> {
+        match self {
+            Bencode::Dict(d) => Ok(d),
+            _ => Err(Error::WrongType { expected: "dict" }),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Parser<'a> {
     data: &'a [u8],
@@ -123,4 +153,6 @@ pub enum Error {
     UnexpectedEof,
     #[error("Keys of Bencode dictionaries must be strings")]
     NonStringKey,
+    #[error("Wrong Bencode type, expected {expected}")]
+    WrongType { expected: &'static str },
 }
