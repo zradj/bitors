@@ -1,6 +1,9 @@
+use url::Url;
+
 #[derive(Debug)]
 pub struct Torrent {
-    pub announce: String,
+    pub announce: Option<Url>,
+    pub announce_list: Option<Vec<Vec<Url>>>,
     pub info: Info,
     pub info_hash: [u8; 20],
 }
