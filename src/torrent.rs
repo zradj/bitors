@@ -52,7 +52,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
 
-        let info= map.require(b"info")?.try_into()?;
+        let info = map.require(b"info")?.try_into()?;
 
         let announce = map
             .get_string(b"announce")?
@@ -83,7 +83,9 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
 
         let creation_date = map
             .get(b"creation date".as_slice())
-            .map(|b| -> Result<u64, Error> { Ok(b.as_int()? as u64) })
+            .map(|b| -> Result<u64, Error> {
+                u64::try_from(b.as_int()?).map_err(|_| Error::IllegalFieldValue("creation date"))
+            })
             .transpose()?;
 
         let comment = map.get_string(b"comment")?;
@@ -108,7 +110,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
 pub struct Info {
     pub name: String,
     pub piece_length: u64,
-    pub pieces: Vec<u8>,
+    pub pieces: Vec<[u8; 20]>,
     pub private: bool,
     pub file_mode: FileMode,
 }
@@ -121,22 +123,29 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info {
 
         let name = map.require_string(b"name")?;
 
-        let piece_length = map.require(b"piece length")?.as_int()? as u64;
+        let piece_length = u64::try_from(map.require(b"piece length")?.as_int()?)
+            .map_err(|_| Error::IllegalFieldValue("piece length"))?;
 
-        let pieces = map.require(b"pieces")?.as_bytes()?.to_vec();
+        let pieces = map.require(b"pieces")?.as_bytes()?;
+        if pieces.len() % 20 != 0 {
+            return Err(Error::InvalidPiecesLength);
+        }
+        let pieces = pieces
+            .chunks_exact(20)
+            .map(|c| c.try_into().expect("Chunk size is exactly 20"))
+            .collect();
 
-        let private = map
-            .get(b"private".as_slice())
-            .map(|b| -> Result<bool, Self::Error> {
+        let private = match map.get(b"private".as_slice()) {
+            Some(b) => {
                 let i = b.as_int()?;
-                if i != 0 && i != 1 {
-                    Err(Error::IllegalFieldValue("private"))
-                } else {
-                    Ok(i == 1)
+                match i {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Error::IllegalFieldValue("private")),
                 }
-            })
-            .transpose()?
-            .unwrap_or(false);
+            }
+            None => false,
+        };
 
         let files = map.get(b"files".as_slice());
 
@@ -151,7 +160,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info {
                 FileMode::Multi { files }
             }
             None => {
-                let length = map.require(b"length")?.as_int()? as u64;
+                let length = u64::try_from(map.require(b"length")?.as_int()?)
+                    .map_err(|_| Error::IllegalFieldValue("length"))?;
 
                 let md5sum = map.get_string(b"md5sum")?;
 
@@ -188,7 +198,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo {
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
 
-        let length = map.require(b"length")?.as_int()? as u64;
+        let length = u64::try_from(map.require(b"length")?.as_int()?)
+            .map_err(|_| Error::IllegalFieldValue("length"))?;
 
         let md5sum = map.get_string(b"md5sum")?;
 
@@ -218,6 +229,8 @@ pub enum Error {
     InvalidUtf8(#[from] std::string::FromUtf8Error),
     #[error("URL parsing error: {0}")]
     InvalidUrl(#[from] url::ParseError),
+    #[error("Length of the 'pieces' list must be a multiple of 20")]
+    InvalidPiecesLength,
     #[error("Missing required field: {0}")]
     MissingField(String),
     #[error("Illegal value in field '{0}'")]
