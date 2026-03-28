@@ -52,7 +52,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
 
-        let info: Info = map.require(b"info")?.try_into()?;
+        let info= map.require(b"info")?.try_into()?;
 
         let announce = map
             .get_string(b"announce")?
