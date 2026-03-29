@@ -176,8 +176,13 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
 
 #[derive(Debug)]
 pub enum FileMode<'a> {
-    Single { length: u64, md5sum: Option<&'a str> },
-    Multi { files: Vec<FileInfo<'a>> },
+    Single {
+        length: u64,
+        md5sum: Option<&'a str>,
+    },
+    Multi {
+        files: Vec<FileInfo<'a>>,
+    },
 }
 
 #[derive(Debug)]
