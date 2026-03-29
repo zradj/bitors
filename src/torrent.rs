@@ -53,7 +53,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
 
         let announce = map
             .get_str(b"announce")?
-            .map(|s| Url::parse(&s))
+            .map(Url::parse)
             .transpose()?;
 
         let announce_list = map
@@ -128,8 +128,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
 
         let private = match map.get(b"private".as_slice()) {
             Some(b) => {
-                let i = b.as_int()?;
-                match i {
+                match b.as_int()? {
                     0 => false,
                     1 => true,
                     _ => return Err(Error::IllegalFieldValue("private")),
