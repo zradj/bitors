@@ -20,11 +20,9 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
 
     fn get_str(&self, key: &[u8]) -> Result<Option<&str>, Error> {
         self.get(key)
-            .map(|b| -> Result<&str, Error> {
-                let bytes = b.as_bytes()?;
-                Ok(std::str::from_utf8(bytes)?)
-            })
+            .map(Bencode::as_str)
             .transpose()
+            .map_err(Into::into)
     }
 
     fn require_str(&self, key: &[u8]) -> Result<&str, Error> {
@@ -66,16 +64,14 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
                     .map(|b| -> Result<Vec<Url>, Error> {
                         b.as_list()?
                             .iter()
-                            .map(|b| -> Result<Url, Error> {
-                                let s = std::str::from_utf8(b.as_bytes()?)?;
-                                Ok(Url::parse(s)?)
-                            })
+                            .map(|b| Ok(Url::parse(b.as_str()?)?))
                             .collect::<Result<Vec<Url>, _>>()
                     })
                     .collect::<Result<Vec<Vec<Url>>, _>>()
             })
             .transpose()?;
 
+        // TODO: add support for DHT
         if announce.is_none() && announce_list.is_none() {
             return Err(Error::MissingAnnounce);
         }
@@ -207,10 +203,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
             .require(b"path")?
             .as_list()?
             .iter()
-            .map(|b| -> Result<&str, Self::Error> {
-                let bytes = b.as_bytes()?;
-                Ok(std::str::from_utf8(bytes)?)
-            })
+            .map(Bencode::as_str)
             .collect::<Result<Vec<&str>, _>>()?;
 
         Ok(Self {
@@ -225,16 +218,14 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
 pub enum Error {
     #[error("Bencode parsing error: {0}")]
     Bencode(#[from] crate::bencode::Error),
-    #[error("UTF-8 error: {0}")]
-    InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("URL parsing error: {0}")]
     InvalidUrl(#[from] url::ParseError),
-    #[error("Length of the 'pieces' list must be a multiple of 20")]
-    InvalidPiecesLength,
     #[error("Missing required field: {0}")]
     MissingField(String),
     #[error("Illegal value in field '{0}'")]
     IllegalFieldValue(&'static str),
+    #[error("Length of the 'pieces' list must be a multiple of 20")]
+    InvalidPiecesLength,
     #[error("No announce URLs found")]
     MissingAnnounce,
 }

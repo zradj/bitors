@@ -18,7 +18,7 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    pub fn as_bytes(&self) -> Result<&'a [u8], Error> {
+    pub fn as_bytes(&self) -> Result<&[u8], Error> {
         match self {
             Bencode::Bytes(b) => Ok(b),
             _ => Err(Error::WrongType { expected: "bytes" }),
@@ -32,11 +32,16 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    pub fn as_dict(&self) -> Result<&BTreeMap<&'a [u8], Bencode<'a>>, Error> {
+    pub fn as_dict(&self) -> Result<&BTreeMap<&[u8], Bencode<'a>>, Error> {
         match self {
             Bencode::Dict(d) => Ok(d),
             _ => Err(Error::WrongType { expected: "dict" }),
         }
+    }
+
+    pub fn as_str(&self) -> Result<&str, Error> {
+        let bytes = self.as_bytes()?;
+        Ok(std::str::from_utf8(bytes)?)
     }
 }
 
