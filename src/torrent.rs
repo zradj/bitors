@@ -7,8 +7,8 @@ use crate::bencode::Bencode;
 
 trait DictExt<'a> {
     fn require(&self, key: &[u8]) -> Result<&Bencode<'a>, Error>;
-    fn get_string(&self, key: &[u8]) -> Result<Option<String>, Error>;
-    fn require_string(&self, key: &[u8]) -> Result<String, Error>;
+    fn get_str(&self, key: &[u8]) -> Result<Option<&str>, Error>;
+    fn require_str(&self, key: &[u8]) -> Result<&str, Error>;
 }
 
 impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
@@ -18,35 +18,34 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
         ))
     }
 
-    fn get_string(&self, key: &[u8]) -> Result<Option<String>, Error> {
+    fn get_str(&self, key: &[u8]) -> Result<Option<&str>, Error> {
         self.get(key)
-            .map(|b| -> Result<String, Error> {
+            .map(|b| -> Result<&str, Error> {
                 let bytes = b.as_bytes()?;
-                Ok(String::from_utf8(bytes.to_vec())?)
+                Ok(std::str::from_utf8(bytes)?)
             })
             .transpose()
     }
 
-    fn require_string(&self, key: &[u8]) -> Result<String, Error> {
-        self.get_string(key)?.ok_or(Error::MissingField(
+    fn require_str(&self, key: &[u8]) -> Result<&str, Error> {
+        self.get_str(key)?.ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
         ))
     }
 }
 
 #[derive(Debug)]
-pub struct Torrent {
-    pub info: Info,
-    // pub info_hash: [u8; 20],
+pub struct Torrent<'a> {
+    pub info: Info<'a>,
     pub announce: Option<Url>,
     pub announce_list: Option<Vec<Vec<Url>>>,
     pub creation_date: Option<u64>,
-    pub comment: Option<String>,
-    pub created_by: Option<String>,
-    pub encoding: Option<String>,
+    pub comment: Option<&'a str>,
+    pub created_by: Option<&'a str>,
+    pub encoding: Option<&'a str>,
 }
 
-impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
+impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     type Error = Error;
 
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
@@ -55,7 +54,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
         let info = map.require(b"info")?.try_into()?;
 
         let announce = map
-            .get_string(b"announce")?
+            .get_str(b"announce")?
             .map(|s| Url::parse(&s))
             .transpose()?;
 
@@ -68,8 +67,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
                         b.as_list()?
                             .iter()
                             .map(|b| -> Result<Url, Error> {
-                                let s = String::from_utf8(b.as_bytes()?.to_vec())?;
-                                Ok(Url::parse(&s)?)
+                                let s = std::str::from_utf8(b.as_bytes()?)?;
+                                Ok(Url::parse(s)?)
                             })
                             .collect::<Result<Vec<Url>, _>>()
                     })
@@ -88,11 +87,11 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
             })
             .transpose()?;
 
-        let comment = map.get_string(b"comment")?;
+        let comment = map.get_str(b"comment")?;
 
-        let created_by = map.get_string(b"created by")?;
+        let created_by = map.get_str(b"created by")?;
 
-        let encoding = map.get_string(b"encoding")?;
+        let encoding = map.get_str(b"encoding")?;
 
         Ok(Self {
             info,
@@ -107,33 +106,29 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent {
 }
 
 #[derive(Debug)]
-pub struct Info {
-    pub name: String,
+pub struct Info<'a> {
+    pub name: &'a str,
     pub piece_length: u64,
-    pub pieces: Vec<[u8; 20]>,
+    pub pieces: &'a [[u8; 20]],
     pub private: bool,
-    pub file_mode: FileMode,
+    pub file_mode: FileMode<'a>,
 }
 
-impl<'a> TryFrom<&'a Bencode<'a>> for Info {
+impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
     type Error = Error;
 
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
 
-        let name = map.require_string(b"name")?;
+        let name = map.require_str(b"name")?;
 
         let piece_length = u64::try_from(map.require(b"piece length")?.as_int()?)
             .map_err(|_| Error::IllegalFieldValue("piece length"))?;
 
         let pieces = map.require(b"pieces")?.as_bytes()?;
-        if pieces.len() % 20 != 0 {
+        let (pieces, []) = pieces.as_chunks() else {
             return Err(Error::InvalidPiecesLength);
-        }
-        let pieces = pieces
-            .chunks_exact(20)
-            .map(|c| c.try_into().expect("Chunk size is exactly 20"))
-            .collect();
+        };
 
         let private = match map.get(b"private".as_slice()) {
             Some(b) => {
@@ -163,7 +158,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info {
                 let length = u64::try_from(map.require(b"length")?.as_int()?)
                     .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-                let md5sum = map.get_string(b"md5sum")?;
+                let md5sum = map.get_str(b"md5sum")?;
 
                 FileMode::Single { length, md5sum }
             }
@@ -180,19 +175,19 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info {
 }
 
 #[derive(Debug)]
-pub enum FileMode {
-    Single { length: u64, md5sum: Option<String> },
-    Multi { files: Vec<FileInfo> },
+pub enum FileMode<'a> {
+    Single { length: u64, md5sum: Option<&'a str> },
+    Multi { files: Vec<FileInfo<'a>> },
 }
 
 #[derive(Debug)]
-pub struct FileInfo {
+pub struct FileInfo<'a> {
     pub length: u64,
-    pub md5sum: Option<String>,
-    pub path: Vec<String>,
+    pub md5sum: Option<&'a str>,
+    pub path: Vec<&'a str>,
 }
 
-impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo {
+impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
     type Error = Error;
 
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
@@ -201,17 +196,17 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo {
         let length = u64::try_from(map.require(b"length")?.as_int()?)
             .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-        let md5sum = map.get_string(b"md5sum")?;
+        let md5sum = map.get_str(b"md5sum")?;
 
         let path = map
             .require(b"path")?
             .as_list()?
             .iter()
-            .map(|b| -> Result<String, Self::Error> {
+            .map(|b| -> Result<&str, Self::Error> {
                 let bytes = b.as_bytes()?;
-                Ok(String::from_utf8(bytes.to_vec())?)
+                Ok(std::str::from_utf8(bytes)?)
             })
-            .collect::<Result<Vec<String>, _>>()?;
+            .collect::<Result<Vec<&str>, _>>()?;
 
         Ok(Self {
             length,
@@ -226,7 +221,7 @@ pub enum Error {
     #[error("Bencode parsing error: {0}")]
     Bencode(#[from] crate::bencode::Error),
     #[error("UTF-8 error: {0}")]
-    InvalidUtf8(#[from] std::string::FromUtf8Error),
+    InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("URL parsing error: {0}")]
     InvalidUrl(#[from] url::ParseError),
     #[error("Length of the 'pieces' list must be a multiple of 20")]
