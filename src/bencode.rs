@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// Represents a parsed Bencode value.
 ///
-/// Bencode is the encoding format used by the BitTorrent protocol. 
+/// Bencode is the encoding format used by the BitTorrent protocol.
 /// It supports four data types: integers, byte strings, lists, and dictionaries.
 #[derive(Debug)]
 pub enum Bencode<'a> {
@@ -67,7 +67,7 @@ impl<'a> Bencode<'a> {
     /// Attempts to unwrap the value as a UTF-8 string.
     ///
     /// # Errors
-    /// Returns `Error::WrongType` if the variant is not `Bencode::Bytes`, 
+    /// Returns `Error::WrongType` if the variant is not `Bencode::Bytes`,
     /// or `Error::InvalidUtf8` if the bytes are not valid UTF-8.
     pub fn as_str(&self) -> Result<&str, Error> {
         let bytes = self.as_bytes()?;
@@ -77,7 +77,7 @@ impl<'a> Bencode<'a> {
 
 /// A parser for reading Bencode-encoded byte slices.
 ///
-/// Holds a reference to the underlying byte slice and maintains a cursor 
+/// Holds a reference to the underlying byte slice and maintains a cursor
 /// to track the current parsing position.
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -229,7 +229,10 @@ mod tests {
     #[test]
     fn test_parse_integer() {
         assert_eq!(Parser::new(b"i42e").parse().unwrap().as_int().unwrap(), 42);
-        assert_eq!(Parser::new(b"i-42e").parse().unwrap().as_int().unwrap(), -42);
+        assert_eq!(
+            Parser::new(b"i-42e").parse().unwrap().as_int().unwrap(),
+            -42
+        );
         assert_eq!(Parser::new(b"i0e").parse().unwrap().as_int().unwrap(), 0);
     }
 
@@ -279,7 +282,7 @@ mod tests {
         let mut parser = Parser::new(b"li42e4:spame");
         let val = parser.parse().unwrap();
         let list = val.as_list().unwrap();
-        
+
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].as_int().unwrap(), 42);
         assert_eq!(list[1].as_str().unwrap(), "spam");
@@ -295,7 +298,7 @@ mod tests {
         let mut parser = Parser::new(b"d3:bar4:spam3:fooi42ee");
         let val = parser.parse().unwrap();
         let dict = val.as_dict().unwrap();
-        
+
         assert_eq!(dict.len(), 2);
         assert_eq!(dict.get(&b"bar"[..]).unwrap().as_str().unwrap(), "spam");
         assert_eq!(dict.get(&b"foo"[..]).unwrap().as_int().unwrap(), 42);
@@ -333,11 +336,11 @@ mod tests {
         // Parses `d1:ad1:bd1:ci42eeee` which translates to {"a": {"b": {"c": 42}}}
         let mut parser = Parser::new(b"d1:ad1:bd1:ci42eeee");
         let val = parser.parse().unwrap();
-        
+
         let a = val.as_dict().unwrap().get(&b"a"[..]).unwrap();
         let b = a.as_dict().unwrap().get(&b"b"[..]).unwrap();
         let c = b.as_dict().unwrap().get(&b"c"[..]).unwrap();
-        
+
         assert_eq!(c.as_int().unwrap(), 42);
     }
 }
