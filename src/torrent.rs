@@ -13,6 +13,7 @@ trait DictExt<'a> {
 }
 
 impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
+    /// Removes the need in `b"...".as_slice()` in normal `BTreeMap::get` calls.
     fn opt(&self, key: &[u8]) -> Option<&Bencode<'a>> {
         self.get(key)
     }
@@ -137,9 +138,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
             None => false,
         };
 
-        let files = map.opt(b"files");
-
-        let file_mode = match files {
+        let file_mode = match map.opt(b"files") {
             Some(b) => {
                 let files = b
                     .as_list()?
@@ -217,6 +216,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
 pub enum Error {
     #[error("Bencode parsing error: {0}")]
     Bencode(#[from] crate::bencode::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("URL parsing error: {0}")]
     InvalidUrl(#[from] url::ParseError),
     #[error("Missing required field: {0}")]
