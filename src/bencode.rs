@@ -192,7 +192,7 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
             map.insert(b"created by", Self::Bytes(created_by.as_bytes()));
         }
 
-        if let Some(encoding) = torrent.comment {
+        if let Some(encoding) = torrent.encoding {
             map.insert(b"encoding", Self::Bytes(encoding.as_bytes()));
         }
 
