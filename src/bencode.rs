@@ -1,6 +1,12 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    io::{self, Write},
+    vec,
+};
 
 use thiserror::Error;
+
+use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
 
 /// Represents a parsed Bencode value.
 ///
@@ -20,6 +26,18 @@ pub enum Bencode<'a> {
 }
 
 impl<'a> Bencode<'a> {
+    pub fn try_to_torrent(&self) -> Result<Torrent<'_>, torrent::Error> {
+        self.try_into()
+    }
+
+    pub fn try_to_info(&self) -> Result<Info<'_>, torrent::Error> {
+        self.try_into()
+    }
+
+    pub fn try_to_file_info(&self) -> Result<FileInfo<'_>, torrent::Error> {
+        self.try_into()
+    }
+
     /// Attempts to unwrap the value as an integer.
     ///
     /// # Errors
@@ -72,6 +90,164 @@ impl<'a> Bencode<'a> {
     pub fn as_str(&self) -> Result<&str, Error> {
         let bytes = self.as_bytes()?;
         Ok(std::str::from_utf8(bytes)?)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.encoded_len());
+        self.encode_to_writer(&mut buf)
+            .expect("Writing to Vec should not fail");
+        buf
+    }
+
+    pub fn encode_to_vec(&self, buf: &mut Vec<u8>) {
+        buf.reserve_exact(self.encoded_len());
+        self.encode_to_writer(buf)
+            .expect("Writing to Vec should not fail");
+    }
+
+    pub fn encode_to_writer<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        match self {
+            Bencode::Int(i) => write!(writer, "i{i}e")?,
+            Bencode::Bytes(bytes) => {
+                write!(writer, "{}:", bytes.len())?;
+                writer.write_all(bytes)?;
+            }
+            Bencode::List(list) => {
+                writer.write_all(b"l")?;
+                for item in list {
+                    item.encode_to_writer(writer)?;
+                }
+                writer.write_all(b"e")?;
+            }
+            Bencode::Dict(dict) => {
+                writer.write_all(b"d")?;
+                for (k, v) in dict {
+                    Bencode::Bytes(k).encode_to_writer(writer)?;
+                    v.encode_to_writer(writer)?;
+                }
+                writer.write_all(b"e")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Bencode::Int(i) => encoded_int_len(*i),
+            Bencode::Bytes(b) => encoded_bytes_len(b.len()),
+            Bencode::List(l) => 2 + l.iter().map(Bencode::encoded_len).sum::<usize>(),
+            Bencode::Dict(d) => {
+                2 + d
+                    .iter()
+                    .map(|(k, v)| encoded_bytes_len(k.len()) + v.encoded_len())
+                    .sum::<usize>()
+            }
+        }
+    }
+}
+
+fn encoded_int_len(i: i64) -> usize {
+    2 + i.to_string().len()
+}
+
+fn encoded_bytes_len(byte_len: usize) -> usize {
+    byte_len.to_string().len() + byte_len + 1
+}
+
+impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
+    fn from(torrent: &'a Torrent) -> Self {
+        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        map.insert(b"info", (&torrent.info).into());
+
+        if let Some(url) = &torrent.announce {
+            map.insert(b"announce", Self::Bytes(url.as_str().as_bytes()));
+        }
+
+        if let Some(announce_list) = &torrent.announce_list {
+            let announce_list = announce_list
+                .iter()
+                .map(|v| {
+                    let urls = v
+                        .iter()
+                        .map(|url| Self::Bytes(url.as_str().as_bytes()))
+                        .collect();
+                    Self::List(urls)
+                })
+                .collect();
+
+            map.insert(b"announce-list", Self::List(announce_list));
+        }
+
+        if let Some(creation_date) = torrent.creation_date {
+            map.insert(b"creation date", Self::Int(creation_date as i64));
+        }
+
+        if let Some(comment) = torrent.comment {
+            map.insert(b"comment", Self::Bytes(comment.as_bytes()));
+        }
+
+        if let Some(created_by) = torrent.created_by {
+            map.insert(b"created by", Self::Bytes(created_by.as_bytes()));
+        }
+
+        if let Some(encoding) = torrent.comment {
+            map.insert(b"encoding", Self::Bytes(encoding.as_bytes()));
+        }
+
+        Self::Dict(map)
+    }
+}
+
+impl<'a> From<&'a Info<'a>> for Bencode<'a> {
+    fn from(info: &'a Info<'a>) -> Self {
+        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        map.insert(b"name", Self::Bytes(info.name.as_bytes()));
+        map.insert(b"piece length", Self::Int(info.piece_length as i64));
+        map.insert(b"pieces", Self::Bytes(info.pieces.as_flattened()));
+
+        if info.private {
+            map.insert(b"private", Self::Int(1));
+        }
+
+        match &info.file_mode {
+            FileMode::Single { length, md5sum } => {
+                map.insert(b"length", Self::Int(*length as i64));
+
+                if let Some(md5sum) = md5sum {
+                    map.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
+                }
+            }
+            FileMode::Multi { files } => {
+                let files = files.iter().map(Bencode::from).collect();
+                map.insert(b"files", Self::List(files));
+            }
+        }
+
+        Self::Dict(map)
+    }
+}
+
+impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
+    fn from(file_info: &'a FileInfo<'a>) -> Self {
+        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        map.insert(b"length", Self::Int(file_info.length as i64));
+
+        let path: Vec<Self> = file_info
+            .path
+            .iter()
+            .map(|s| Self::Bytes(s.as_bytes()))
+            .collect();
+        map.insert(b"path", Self::List(path));
+
+        if let Some(md5sum) = file_info.md5sum {
+            map.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
+        }
+
+        Self::Dict(map)
     }
 }
 

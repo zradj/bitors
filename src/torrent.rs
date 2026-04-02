@@ -49,6 +49,12 @@ pub struct Torrent<'a> {
     pub encoding: Option<&'a str>,
 }
 
+impl<'a> Torrent<'a> {
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
+}
+
 impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     type Error = Error;
 
@@ -111,6 +117,12 @@ pub struct Info<'a> {
     pub pieces: &'a [[u8; 20]],
     pub private: bool,
     pub file_mode: FileMode<'a>,
+}
+
+impl<'a> Info<'a> {
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
 }
 
 impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
@@ -184,6 +196,12 @@ pub struct FileInfo<'a> {
     pub length: u64,
     pub md5sum: Option<&'a str>,
     pub path: Vec<&'a str>,
+}
+
+impl<'a> FileInfo<'a> {
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
 }
 
 impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
