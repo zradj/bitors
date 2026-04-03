@@ -331,3 +331,162 @@ pub enum Error {
     #[error("No announce URLs found")]
     MissingAnnounce,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    // Helper to generate a valid 20-byte dummy hash for testing
+    fn dummy_pieces() -> [u8; 20] {
+        [0xab; 20]
+    }
+
+    #[test]
+    fn test_parse_single_file_info() {
+        let mut map = BTreeMap::new();
+        map.insert(&b"name"[..], Bencode::Bytes(b"ubuntu.iso"));
+        map.insert(&b"piece length"[..], Bencode::Int(262144));
+        let pieces = dummy_pieces();
+        map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
+        map.insert(&b"length"[..], Bencode::Int(1024000));
+        
+        let bencode = Bencode::Dict(map);
+        let info = Info::try_from(&bencode).expect("Failed to parse valid single-file info");
+
+        assert_eq!(info.name, "ubuntu.iso");
+        assert_eq!(info.piece_length, 262144);
+        assert_eq!(info.pieces.len(), 1); // 1 chunk of 20 bytes
+        assert_eq!(info.private, false);
+
+        match info.file_mode {
+            FileMode::Single { length, md5sum } => {
+                assert_eq!(length, 1024000);
+                assert_eq!(md5sum, None);
+            }
+            _ => panic!("Expected FileMode::Single"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_file_info() {
+        // Build a FileInfo dict
+        let mut file_map = BTreeMap::new();
+        file_map.insert(&b"length"[..], Bencode::Int(512));
+        let path_list = vec![Bencode::Bytes(b"docs"), Bencode::Bytes(b"readme.txt")];
+        file_map.insert(&b"path"[..], Bencode::List(path_list));
+        let file_bencode = Bencode::Dict(file_map);
+
+        // Build the main Info dict
+        let mut map = BTreeMap::new();
+        map.insert(&b"name"[..], Bencode::Bytes(b"my_folder"));
+        map.insert(&b"piece length"[..], Bencode::Int(262144));
+        let pieces = dummy_pieces();
+        map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
+        map.insert(&b"files"[..], Bencode::List(vec![file_bencode]));
+
+        let bencode = Bencode::Dict(map);
+        let info = Info::try_from(&bencode).expect("Failed to parse valid multi-file info");
+
+        assert_eq!(info.name, "my_folder");
+        
+        match info.file_mode {
+            FileMode::Multi { files } => {
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].length, 512);
+                assert_eq!(files[0].path, vec!["docs", "readme.txt"]);
+            }
+            _ => panic!("Expected FileMode::Multi"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_pieces_length() {
+        let mut map = BTreeMap::new();
+        map.insert(&b"name"[..], Bencode::Bytes(b"test"));
+        map.insert(&b"piece length"[..], Bencode::Int(262144));
+        map.insert(&b"length"[..], Bencode::Int(1024));
+        
+        // 21 bytes is invalid (must be multiple of 20)
+        let invalid_pieces = [0xab; 21];
+        map.insert(&b"pieces"[..], Bencode::Bytes(&invalid_pieces));
+        
+        let bencode = Bencode::Dict(map);
+        let err = Info::try_from(&bencode).expect_err("Should have failed on invalid pieces length");
+        
+        assert!(matches!(err, Error::InvalidPiecesLength));
+    }
+
+    #[test]
+    fn test_torrent_missing_announce() {
+        // Build a valid Info dict
+        let mut info_map = BTreeMap::new();
+        info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
+        info_map.insert(&b"piece length"[..], Bencode::Int(262144));
+        info_map.insert(&b"length"[..], Bencode::Int(1024));
+        let pieces = dummy_pieces();
+        info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
+        
+        let mut torrent_map = BTreeMap::new();
+        torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
+        // Intentionally leaving out 'announce' and 'announce-list'
+
+        let bencode = Bencode::Dict(torrent_map);
+        let err = Torrent::try_from(&bencode).expect_err("Should have failed due to missing announce");
+        
+        assert!(matches!(err, Error::MissingAnnounce));
+    }
+
+    #[test]
+    fn test_parse_valid_torrent() {
+        let mut info_map = BTreeMap::new();
+        info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
+        info_map.insert(&b"piece length"[..], Bencode::Int(262144));
+        info_map.insert(&b"length"[..], Bencode::Int(1024));
+        let pieces = dummy_pieces();
+        info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
+        
+        let mut torrent_map = BTreeMap::new();
+        torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
+        torrent_map.insert(&b"announce"[..], Bencode::Bytes(b"http://tracker.example.com/announce"));
+        torrent_map.insert(&b"created by"[..], Bencode::Bytes(b"MyTorrentClient/1.0"));
+        torrent_map.insert(&b"creation date"[..], Bencode::Int(1620000000));
+
+        let bencode = Bencode::Dict(torrent_map);
+        let torrent = Torrent::try_from(&bencode).expect("Failed to parse valid torrent");
+
+        assert_eq!(torrent.announce.unwrap().as_str(), "http://tracker.example.com/announce");
+        assert_eq!(torrent.created_by.unwrap(), "MyTorrentClient/1.0");
+        assert_eq!(torrent.creation_date.unwrap(), 1620000000);
+        assert_eq!(torrent.info.name, "test");
+    }
+
+    #[test]
+    fn test_announce_list() {
+        let mut info_map = BTreeMap::new();
+        info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
+        info_map.insert(&b"piece length"[..], Bencode::Int(262144));
+        info_map.insert(&b"length"[..], Bencode::Int(1024));
+        let pieces = dummy_pieces();
+        info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
+        
+        let mut torrent_map = BTreeMap::new();
+        torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
+        
+        // Multi-tier announce list: [["http://tracker1.com"], ["http://tracker2.com", "http://tracker3.com"]]
+        let tier1 = Bencode::List(vec![Bencode::Bytes(b"http://tracker1.com")]);
+        let tier2 = Bencode::List(vec![
+            Bencode::Bytes(b"http://tracker2.com"), 
+            Bencode::Bytes(b"http://tracker3.com")
+        ]);
+        torrent_map.insert(&b"announce-list"[..], Bencode::List(vec![tier1, tier2]));
+
+        let bencode = Bencode::Dict(torrent_map);
+        let torrent = Torrent::try_from(&bencode).expect("Failed to parse valid torrent with announce-list");
+
+        let announce_list = torrent.announce_list.unwrap();
+        assert_eq!(announce_list.len(), 2);
+        assert_eq!(announce_list[0][0].as_str(), "http://tracker1.com/");
+        assert_eq!(announce_list[1][1].as_str(), "http://tracker3.com/");
+    }
+}
