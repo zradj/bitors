@@ -64,7 +64,7 @@ impl<'a> Bencode<'a> {
     ///
     /// # Errors
     /// Returns `Error::WrongType` if the variant is not `Bencode::List`.
-    pub fn as_list(&self) -> Result<&Vec<Bencode<'a>>, Error> {
+    pub fn as_list(&self) -> Result<&[Bencode<'a>], Error> {
         match self {
             Bencode::List(l) => Ok(l),
             _ => Err(Error::WrongType { expected: "list" }),

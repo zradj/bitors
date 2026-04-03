@@ -67,13 +67,13 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
 
         let announce_list = map
             .opt(b"announce-list")
-            .map(|b| -> Result<Vec<Vec<Url>>, Error> {
+            .map(|b| {
                 b.as_list()?
                     .iter()
-                    .map(|b| -> Result<Vec<Url>, Error> {
+                    .map(|b| {
                         b.as_list()?
                             .iter()
-                            .map(|b| Ok(Url::parse(b.as_str()?)?))
+                            .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
                             .collect::<Result<Vec<Url>, _>>()
                     })
                     .collect::<Result<Vec<Vec<Url>>, _>>()
