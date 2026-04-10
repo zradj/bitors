@@ -1,3 +1,5 @@
+pub mod builder;
+
 use std::collections::BTreeMap;
 
 use thiserror::Error;
@@ -10,14 +12,14 @@ use crate::bencode::Bencode;
 trait DictExt<'a> {
     /// Retrieves a reference to the value associated with the given byte slice key.
     fn opt(&self, key: &[u8]) -> Option<&Bencode<'a>>;
-    
+
     /// Retrieves a reference to the value, returning an error if the key is missing.
     fn require(&self, key: &[u8]) -> Result<&Bencode<'a>, Error>;
-    
+
     /// Retrieves a string value, returning `None` if the key is missing.
     /// Returns an error if the key exists but is not a valid string.
     fn opt_str(&self, key: &[u8]) -> Result<Option<&str>, Error>;
-    
+
     /// Retrieves a string value, returning an error if the key is missing or not a string.
     fn require_str(&self, key: &[u8]) -> Result<&str, Error>;
 }
@@ -50,7 +52,7 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
 
 /// Represents the root data structure of a parsed `.torrent` file.
 ///
-/// This struct contains all the top-level metadata required by a BitTorrent client 
+/// This struct contains all the top-level metadata required by a BitTorrent client
 /// to connect to trackers and understand the contents of the torrent.
 #[derive(Debug)]
 pub struct Torrent<'a> {
@@ -66,7 +68,7 @@ pub struct Torrent<'a> {
     pub comment: Option<&'a str>,
     /// Name and version of the program used to create the .torrent.
     pub created_by: Option<&'a str>,
-    /// The string encoding format used to generate the pieces part of the info dictionary 
+    /// The string encoding format used to generate the pieces part of the info dictionary
     /// in the .torrent metainfo file (e.g., "UTF-8").
     pub encoding: Option<&'a str>,
 }
@@ -93,7 +95,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
 
-        let info = map.require(b"info")?.try_into()?;
+        let info: Info<'_> = map.require(b"info")?.try_into()?;
 
         let announce = map.opt_str(b"announce")?.map(Url::parse).transpose()?;
 
@@ -112,8 +114,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
             })
             .transpose()?;
 
-        // TODO: add support for DHT
-        if announce.is_none() && announce_list.is_none() {
+        if !info.private && announce.is_none() && announce_list.is_none() {
             return Err(Error::MissingAnnounce);
         }
 
@@ -148,14 +149,14 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
 /// including file names, piece sizes, and the cryptographic hashes used to verify data integrity.
 #[derive(Debug)]
 pub struct Info<'a> {
-    /// In the single file case, the name of the file. 
+    /// In the single file case, the name of the file.
     /// In the multiple file case, the name of the directory in which to store all the files.
     pub name: &'a str,
     /// The number of bytes in each piece the files are split into.
     pub piece_length: u64,
     /// An array of 20-byte SHA1 hashes, one for each piece in the torrent.
     pub pieces: &'a [[u8; 20]],
-    /// If true, the client must not obtain peer data from the DHT or PEX. 
+    /// If true, the client must not obtain peer data from the DHT or PEX.
     /// It must only rely on the specified tracker(s).
     pub private: bool,
     /// Dictates whether this torrent represents a single file or a directory of multiple files.
@@ -176,7 +177,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an `Error` if required fields are missing, if `pieces` is not 
+    /// Returns an `Error` if required fields are missing, if `pieces` is not
     /// perfectly divisible by 20 bytes, or if data types are incorrect.
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
@@ -305,28 +306,28 @@ pub enum Error {
     /// Indicates an underlying failure when parsing the Bencode data structure.
     #[error("Bencode parsing error: {0}")]
     Bencode(#[from] crate::bencode::Error),
-    
+
     /// Indicates an I/O related failure.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     /// Indicates that an announce URL could not be parsed properly.
     #[error("URL parsing error: {0}")]
     InvalidUrl(#[from] url::ParseError),
-    
+
     /// Indicates a field mandated by the BitTorrent specification is missing.
     #[error("Missing required field: {0}")]
     MissingField(String),
-    
+
     /// Indicates a field was found, but contained an invalid value or data type.
     #[error("Illegal value in field '{0}'")]
     IllegalFieldValue(&'static str),
-    
+
     /// Indicates the concatenated pieces byte string is not a multiple of 20.
     /// Since SHA-1 hashes are exactly 20 bytes long, this implies data corruption.
     #[error("Length of the 'pieces' list must be a multiple of 20")]
     InvalidPiecesLength,
-    
+
     /// Indicates that neither an `announce` nor `announce-list` field was found.
     #[error("No announce URLs found")]
     MissingAnnounce,
@@ -350,7 +351,7 @@ mod tests {
         let pieces = dummy_pieces();
         map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
         map.insert(&b"length"[..], Bencode::Int(1024000));
-        
+
         let bencode = Bencode::Dict(map);
         let info = Info::try_from(&bencode).expect("Failed to parse valid single-file info");
 
@@ -389,7 +390,7 @@ mod tests {
         let info = Info::try_from(&bencode).expect("Failed to parse valid multi-file info");
 
         assert_eq!(info.name, "my_folder");
-        
+
         match info.file_mode {
             FileMode::Multi { files } => {
                 assert_eq!(files.len(), 1);
@@ -406,14 +407,15 @@ mod tests {
         map.insert(&b"name"[..], Bencode::Bytes(b"test"));
         map.insert(&b"piece length"[..], Bencode::Int(262144));
         map.insert(&b"length"[..], Bencode::Int(1024));
-        
+
         // 21 bytes is invalid (must be multiple of 20)
         let invalid_pieces = [0xab; 21];
         map.insert(&b"pieces"[..], Bencode::Bytes(&invalid_pieces));
-        
+
         let bencode = Bencode::Dict(map);
-        let err = Info::try_from(&bencode).expect_err("Should have failed on invalid pieces length");
-        
+        let err =
+            Info::try_from(&bencode).expect_err("Should have failed on invalid pieces length");
+
         assert!(matches!(err, Error::InvalidPiecesLength));
     }
 
@@ -426,14 +428,15 @@ mod tests {
         info_map.insert(&b"length"[..], Bencode::Int(1024));
         let pieces = dummy_pieces();
         info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
-        
+
         let mut torrent_map = BTreeMap::new();
         torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
         // Intentionally leaving out 'announce' and 'announce-list'
 
         let bencode = Bencode::Dict(torrent_map);
-        let err = Torrent::try_from(&bencode).expect_err("Should have failed due to missing announce");
-        
+        let err =
+            Torrent::try_from(&bencode).expect_err("Should have failed due to missing announce");
+
         assert!(matches!(err, Error::MissingAnnounce));
     }
 
@@ -445,17 +448,23 @@ mod tests {
         info_map.insert(&b"length"[..], Bencode::Int(1024));
         let pieces = dummy_pieces();
         info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
-        
+
         let mut torrent_map = BTreeMap::new();
         torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
-        torrent_map.insert(&b"announce"[..], Bencode::Bytes(b"http://tracker.example.com/announce"));
+        torrent_map.insert(
+            &b"announce"[..],
+            Bencode::Bytes(b"http://tracker.example.com/announce"),
+        );
         torrent_map.insert(&b"created by"[..], Bencode::Bytes(b"MyTorrentClient/1.0"));
         torrent_map.insert(&b"creation date"[..], Bencode::Int(1620000000));
 
         let bencode = Bencode::Dict(torrent_map);
         let torrent = Torrent::try_from(&bencode).expect("Failed to parse valid torrent");
 
-        assert_eq!(torrent.announce.unwrap().as_str(), "http://tracker.example.com/announce");
+        assert_eq!(
+            torrent.announce.unwrap().as_str(),
+            "http://tracker.example.com/announce"
+        );
         assert_eq!(torrent.created_by.unwrap(), "MyTorrentClient/1.0");
         assert_eq!(torrent.creation_date.unwrap(), 1620000000);
         assert_eq!(torrent.info.name, "test");
@@ -469,20 +478,21 @@ mod tests {
         info_map.insert(&b"length"[..], Bencode::Int(1024));
         let pieces = dummy_pieces();
         info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
-        
+
         let mut torrent_map = BTreeMap::new();
         torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
-        
+
         // Multi-tier announce list: [["http://tracker1.com"], ["http://tracker2.com", "http://tracker3.com"]]
         let tier1 = Bencode::List(vec![Bencode::Bytes(b"http://tracker1.com")]);
         let tier2 = Bencode::List(vec![
-            Bencode::Bytes(b"http://tracker2.com"), 
-            Bencode::Bytes(b"http://tracker3.com")
+            Bencode::Bytes(b"http://tracker2.com"),
+            Bencode::Bytes(b"http://tracker3.com"),
         ]);
         torrent_map.insert(&b"announce-list"[..], Bencode::List(vec![tier1, tier2]));
 
         let bencode = Bencode::Dict(torrent_map);
-        let torrent = Torrent::try_from(&bencode).expect("Failed to parse valid torrent with announce-list");
+        let torrent =
+            Torrent::try_from(&bencode).expect("Failed to parse valid torrent with announce-list");
 
         let announce_list = torrent.announce_list.unwrap();
         assert_eq!(announce_list.len(), 2);
