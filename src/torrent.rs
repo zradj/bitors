@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use url::Url;
 
-use crate::bencode::Bencode;
+use crate::{bencode::Bencode, torrent::builder::{OwnedFileInfo, OwnedFileMode, OwnedInfo, OwnedTorrent}};
 
 /// An internal extension trait for `BTreeMap` to simplify extracting optional
 /// and required fields from Bencoded dictionaries.
@@ -84,6 +84,10 @@ impl<'a> Torrent<'a> {
 
     /// Converts the `Torrent` struct back into a `Bencode` representation.
     pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
+
+    pub fn into_owned(self) -> OwnedTorrent {
         self.into()
     }
 }
@@ -176,6 +180,10 @@ impl<'a> Info<'a> {
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
     }
+
+    pub fn into_owned(self) -> OwnedInfo {
+        self.into()
+    }
 }
 
 impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
@@ -258,6 +266,12 @@ pub enum FileMode<'a> {
     },
 }
 
+impl<'a> FileMode<'a> {
+    pub fn into_owned(self) -> OwnedFileMode {
+        self.into()
+    }
+}
+
 /// Metadata for a single file within a multi-file torrent.
 #[derive(Debug)]
 pub struct FileInfo<'a> {
@@ -273,6 +287,10 @@ pub struct FileInfo<'a> {
 impl<'a> FileInfo<'a> {
     /// Converts the `FileInfo` struct back into a `Bencode` representation.
     pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
+
+    pub fn into_owned(self) -> OwnedFileInfo {
         self.into()
     }
 }

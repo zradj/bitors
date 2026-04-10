@@ -86,6 +86,14 @@ pub struct OwnedTorrent {
 }
 
 impl OwnedTorrent {
+    pub fn trackers(&self) -> Vec<Vec<&Url>> {
+        match (&self.announce, &self.announce_list) {
+            (Some(url), None) => vec![vec![url]],
+            (_, Some(tiers)) => tiers.iter().map(|tier| tier.iter().collect()).collect(),
+            (None, None) => vec![],
+        }
+    }
+
     pub fn as_borrowed(&self) -> Torrent<'_> {
         Torrent {
             info: self.info.as_borrowed(),
@@ -215,7 +223,7 @@ impl<'a> From<FileInfo<'a>> for OwnedFileInfo {
         Self {
             length: file_info.length,
             md5sum: file_info.md5sum.map(String::from),
-            path: file_info.path.iter().map(|s| s.to_string()).collect(),
+            path: file_info.path.into_iter().map(String::from).collect(),
         }
     }
 }
