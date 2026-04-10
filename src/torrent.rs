@@ -74,6 +74,14 @@ pub struct Torrent<'a> {
 }
 
 impl<'a> Torrent<'a> {
+    pub fn trackers(&self) -> Vec<Vec<&Url>> {
+        match (&self.announce, &self.announce_list) {
+            (Some(url), None) => vec![vec![url]],
+            (_, Some(tiers)) => tiers.iter().map(|tier| tier.iter().collect()).collect(),
+            (None, None) => vec![],
+        }
+    }
+
     /// Converts the `Torrent` struct back into a `Bencode` representation.
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()

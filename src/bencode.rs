@@ -333,6 +333,11 @@ impl<'a> Parser<'a> {
             .position(|&b| b == b':')
             .ok_or(Error::UnexpectedEof)?;
         let len_str = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
+
+        if len_str.starts_with("-0") || (len_str.starts_with('0') && len_str.len() > 1) {
+            return Err(Error::InvalidBencodeInteger(len_str.to_string()));
+        }
+
         let len = len_str.parse::<usize>()?;
         self.cursor += colon + 1;
         let bytes = self.peek_slice(len)?;
