@@ -30,6 +30,13 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
         self.get(key)
     }
 
+    fn opt_str(&self, key: &[u8]) -> Result<Option<&str>, Error> {
+        self.opt(key)
+            .map(Bencode::as_str)
+            .transpose()
+            .map_err(Into::into)
+    }
+
     fn require(&self, key: &[u8]) -> Result<&Bencode<'a>, Error> {
         self.opt(key).ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
@@ -40,13 +47,6 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
         self.opt_str(key)?.ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
         ))
-    }
-
-    fn opt_str(&self, key: &[u8]) -> Result<Option<&str>, Error> {
-        self.opt(key)
-            .map(Bencode::as_str)
-            .transpose()
-            .map_err(Into::into)
     }
 }
 
