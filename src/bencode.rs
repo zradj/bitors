@@ -148,11 +148,27 @@ impl<'a> Bencode<'a> {
 }
 
 fn encoded_int_len(i: i64) -> usize {
-    2 + i.to_string().len()
+    if i == 0 {
+        // i0e
+        3
+    } else if i < 0 {
+        // i-<abs>e
+        3 + (i.abs().ilog10() as usize)
+    } else {
+        // i<num>e
+        2 + (i.ilog10() as usize)
+    }
 }
 
 fn encoded_bytes_len(byte_len: usize) -> usize {
-    byte_len.to_string().len() + byte_len + 1
+    let len_str_len = if byte_len == 0 {
+        1
+    } else {
+        byte_len.ilog10() as usize
+    };
+
+    // <len>:<bytes>
+    len_str_len + byte_len + 1
 }
 
 impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
