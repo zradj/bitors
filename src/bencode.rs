@@ -44,7 +44,7 @@ impl<'a> Bencode<'a> {
     /// Returns `Error::WrongType` if the variant is not `Bencode::Int`.
     pub fn as_int(&self) -> Result<i64, Error> {
         match self {
-            Bencode::Int(i) => Ok(*i),
+            Self::Int(i) => Ok(*i),
             _ => Err(Error::WrongType { expected: "int" }),
         }
     }
@@ -55,7 +55,7 @@ impl<'a> Bencode<'a> {
     /// Returns `Error::WrongType` if the variant is not `Bencode::Bytes`.
     pub fn as_bytes(&self) -> Result<&[u8], Error> {
         match self {
-            Bencode::Bytes(b) => Ok(b),
+            Self::Bytes(b) => Ok(b),
             _ => Err(Error::WrongType { expected: "bytes" }),
         }
     }
@@ -66,7 +66,7 @@ impl<'a> Bencode<'a> {
     /// Returns `Error::WrongType` if the variant is not `Bencode::List`.
     pub fn as_list(&self) -> Result<&[Bencode<'a>], Error> {
         match self {
-            Bencode::List(l) => Ok(l),
+            Self::List(l) => Ok(l),
             _ => Err(Error::WrongType { expected: "list" }),
         }
     }
@@ -77,7 +77,7 @@ impl<'a> Bencode<'a> {
     /// Returns `Error::WrongType` if the variant is not `Bencode::Dict`.
     pub fn as_dict(&self) -> Result<&BTreeMap<&[u8], Bencode<'a>>, Error> {
         match self {
-            Bencode::Dict(d) => Ok(d),
+            Self::Dict(d) => Ok(d),
             _ => Err(Error::WrongType { expected: "dict" }),
         }
     }
@@ -107,22 +107,22 @@ impl<'a> Bencode<'a> {
 
     pub fn encode_to_writer<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
-            Bencode::Int(i) => write!(writer, "i{i}e")?,
-            Bencode::Bytes(bytes) => {
+            Self::Int(i) => write!(writer, "i{i}e")?,
+            Self::Bytes(bytes) => {
                 write!(writer, "{}:", bytes.len())?;
                 writer.write_all(bytes)?;
             }
-            Bencode::List(list) => {
+            Self::List(list) => {
                 writer.write_all(b"l")?;
                 for item in list {
                     item.encode_to_writer(writer)?;
                 }
                 writer.write_all(b"e")?;
             }
-            Bencode::Dict(dict) => {
+            Self::Dict(dict) => {
                 writer.write_all(b"d")?;
                 for (k, v) in dict {
-                    Bencode::Bytes(k).encode_to_writer(writer)?;
+                    Self::Bytes(k).encode_to_writer(writer)?;
                     v.encode_to_writer(writer)?;
                 }
                 writer.write_all(b"e")?;
@@ -134,10 +134,10 @@ impl<'a> Bencode<'a> {
 
     pub fn encoded_len(&self) -> usize {
         match self {
-            Bencode::Int(i) => encoded_int_len(*i),
-            Bencode::Bytes(b) => encoded_bytes_len(b.len()),
-            Bencode::List(l) => 2 + l.iter().map(Bencode::encoded_len).sum::<usize>(),
-            Bencode::Dict(d) => {
+            Self::Int(i) => encoded_int_len(*i),
+            Self::Bytes(b) => encoded_bytes_len(b.len()),
+            Self::List(l) => 2 + l.iter().map(Self::encoded_len).sum::<usize>(),
+            Self::Dict(d) => {
                 2 + d
                     .iter()
                     .map(|(k, v)| encoded_bytes_len(k.len()) + v.encoded_len())
