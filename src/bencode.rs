@@ -377,11 +377,21 @@ impl<'a> Parser<'a> {
     fn parse_dict(&mut self) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut map = BTreeMap::new();
+        let mut last_key = None;
+
         while self.peek()? != b'e' {
             let key = match self.parse()? {
                 Bencode::Bytes(b) => b,
                 _ => return Err(Error::NonStringKey),
             };
+
+            if let Some(prev) = last_key {
+                if key <= prev {
+                    return Err(Error::UnsortedDictKeys);
+                }
+            }
+            last_key = Some(key);
+
             let value = self.parse()?;
             map.insert(key, value);
         }
@@ -408,6 +418,8 @@ pub enum Error {
     /// Occurs when the data ends before parsing is complete.
     #[error("Unexpected EOF")]
     UnexpectedEof,
+    #[error("Unsorted dict keys")]
+    UnsortedDictKeys,
     /// Occurs when a dictionary key is not a byte string.
     #[error("Keys of Bencode dictionaries must be strings")]
     NonStringKey,
