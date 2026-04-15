@@ -153,10 +153,10 @@ fn encoded_int_len(i: i64) -> usize {
         3
     } else if i < 0 {
         // i-<abs>e
-        3 + (i.abs().ilog10() as usize)
+        3 + (1 + i.abs().ilog10() as usize)
     } else {
         // i<num>e
-        2 + (i.ilog10() as usize)
+        2 + (1 + i.ilog10() as usize)
     }
 }
 
@@ -164,7 +164,7 @@ fn encoded_bytes_len(byte_len: usize) -> usize {
     let len_str_len = if byte_len == 0 {
         1
     } else {
-        byte_len.ilog10() as usize
+        1 + byte_len.ilog10() as usize
     };
 
     // <len>:<bytes>
