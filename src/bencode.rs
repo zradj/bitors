@@ -534,7 +534,7 @@ impl<'a> Parser<'a> {
             .ok_or(Error::UnexpectedEof)?;
         let len_str = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
 
-        if len_str.starts_with("-0") || (len_str.starts_with('0') && len_str.len() > 1) {
+        if len_str.starts_with('0') && len_str.len() > 1 {
             return Err(Error::InvalidBencodeInteger(len_str.to_string()));
         }
 
