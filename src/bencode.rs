@@ -20,6 +20,8 @@ use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
 ///
 /// Parsing a Bencode integer:
 /// ```
+/// use bitors::bencode::Parser;
+///
 /// let mut parser = Parser::new(b"i42e");
 /// let value = parser.parse().unwrap();
 /// assert_eq!(value.as_int().unwrap(), 42);
@@ -27,6 +29,8 @@ use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
 ///
 /// Encoding a value to bytes:
 /// ```
+/// use bitors::bencode::Bencode;
+/// 
 /// let value = Bencode::Int(42);
 /// assert_eq!(value.encode(), b"i42e");
 /// ```
@@ -385,6 +389,8 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
 /// # Example
 ///
 /// ```
+/// use bitors::bencode::Parser;
+///
 /// let mut parser = Parser::new(b"d3:fooi42ee");
 /// let value = parser.parse().unwrap();
 /// let dict = value.as_dict().unwrap();
@@ -754,5 +760,19 @@ mod tests {
         let c = b.as_dict().unwrap().get(&b"c"[..]).unwrap();
 
         assert_eq!(c.as_int().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_depth_limit() {
+        let mut parser = Parser::with_max_depth(b"lllleeee", 2);
+        assert!(matches!(parser.parse(), Err(Error::DepthLimitExceeded)));
+    }
+
+    #[test]
+    fn test_unsorted_dict() {
+        assert!(matches!(
+            Parser::new(b"d4:spam3:foo3:bari42ee").parse(),
+            Err(Error::UnsortedDictKeys)
+        ));
     }
 }
