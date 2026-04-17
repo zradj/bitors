@@ -99,7 +99,7 @@ impl<'a> Bencode<'a> {
         buf
     }
 
-    pub fn encode_to_vec(&self, buf: &mut Vec<u8>) {
+    pub fn encode_extend(&self, buf: &mut Vec<u8>) {
         buf.reserve_exact(self.encoded_len());
         self.encode_to_writer(buf)
             .expect("Writing to Vec should not fail");
@@ -275,12 +275,21 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
 pub struct Parser<'a> {
     data: &'a [u8],
     cursor: usize,
+    max_depth: usize,
 }
 
 impl<'a> Parser<'a> {
     /// Creates a new `Parser` instance to read from the provided byte slice.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, cursor: 0 }
+        Self::with_max_depth(data, 64)
+    }
+
+    pub fn with_max_depth(data: &'a [u8], max_depth: usize) -> Self {
+        Self {
+            data,
+            cursor: 0,
+            max_depth,
+        }
     }
 
     /// Parses a single Bencode element from the current cursor position.
@@ -290,13 +299,7 @@ impl<'a> Parser<'a> {
     /// # Errors
     /// Returns an `Error` if the data is malformed, unexpectedly truncated, or invalid.
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
-        match self.peek()? {
-            b'i' => self.parse_integer(),
-            b'l' => self.parse_list(),
-            b'd' => self.parse_dict(),
-            b'0'..=b'9' => self.parse_bytes(),
-            b => Err(Error::UnexpectedByte(self.cursor, b)),
-        }
+        self.parse_internal(0)
     }
 
     /// Returns a raw slice of the data from the `start` index up to the current cursor position.
@@ -324,6 +327,20 @@ impl<'a> Parser<'a> {
             .ok_or(Error::UnexpectedEof)
     }
 
+    fn parse_internal(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
+        if depth > self.max_depth {
+            return Err(Error::DepthLimitExceeded);
+        }
+
+        match self.peek()? {
+            b'i' => self.parse_integer(),
+            b'l' => self.parse_list(depth),
+            b'd' => self.parse_dict(depth),
+            b'0'..=b'9' => self.parse_bytes(),
+            b => Err(Error::UnexpectedByte(self.cursor, b)),
+        }
+    }
+
     /// Parses a Bencode integer (format: `i<number>e`).
     fn parse_integer(&mut self) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
@@ -339,6 +356,7 @@ impl<'a> Parser<'a> {
 
         let i = s.parse::<i64>()?;
         self.cursor += end + 1;
+
         Ok(Bencode::Int(i))
     }
 
@@ -358,29 +376,31 @@ impl<'a> Parser<'a> {
         self.cursor += colon + 1;
         let bytes = self.peek_slice(len)?;
         self.cursor += len;
+
         Ok(Bencode::Bytes(bytes))
     }
 
     /// Parses a Bencode list (format: `l<contents>e`).
-    fn parse_list(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse_list(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut list = vec![];
         while self.peek()? != b'e' {
-            let item = self.parse()?;
+            let item = self.parse_internal(depth + 1)?;
             list.push(item);
         }
         self.cursor += 1;
+
         Ok(Bencode::List(list))
     }
 
     /// Parses a Bencode dictionary (format: `d<contents>e`).
-    fn parse_dict(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse_dict(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut map = BTreeMap::new();
         let mut last_key = None;
 
         while self.peek()? != b'e' {
-            let key = match self.parse()? {
+            let key = match self.parse_internal(depth + 1)? {
                 Bencode::Bytes(b) => b,
                 _ => return Err(Error::NonStringKey),
             };
@@ -390,12 +410,14 @@ impl<'a> Parser<'a> {
                     return Err(Error::UnsortedDictKeys);
                 }
             }
+
             last_key = Some(key);
 
-            let value = self.parse()?;
+            let value = self.parse_internal(depth + 1)?;
             map.insert(key, value);
         }
         self.cursor += 1;
+
         Ok(Bencode::Dict(map))
     }
 }
@@ -415,6 +437,8 @@ pub enum Error {
     /// Occurs when an unexpected byte is encountered during parsing.
     #[error("Unexpected byte at position {0}: {1}")]
     UnexpectedByte(usize, u8),
+    #[error("Depth limit exceeded")]
+    DepthLimitExceeded,
     /// Occurs when the data ends before parsing is complete.
     #[error("Unexpected EOF")]
     UnexpectedEof,
