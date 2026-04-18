@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod owned;
 
 use std::collections::BTreeMap;
 
@@ -7,7 +8,7 @@ use url::Url;
 
 use crate::{
     bencode::Bencode,
-    torrent::builder::{OwnedFileInfo, OwnedFileMode, OwnedInfo, OwnedTorrent},
+    torrent::owned::{OwnedFileInfo, OwnedFileMode, OwnedInfo, OwnedTorrent},
 };
 
 /// An internal extension trait for `BTreeMap` to simplify extracting optional
