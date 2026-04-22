@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let bencode = &parser.parse()?;
     let torrent: Torrent = bencode.try_into()?;
     println!("{torrent:?}");
-    let mut new_torrent = File::create_new("new.torrent")?;
+    let mut new_torrent = File::create("new.torrent")?;
     let new_bencode = Bencode::from(&torrent);
     new_bencode.encode_to_writer(&mut new_torrent)?;
     Ok(())
