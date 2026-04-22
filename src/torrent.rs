@@ -327,39 +327,6 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
     }
 }
 
-/// Errors that can occur during the parsing and validation of a `.torrent` file.
-#[derive(Debug, Error)]
-pub enum Error {
-    /// Indicates an underlying failure when parsing the Bencode data structure.
-    #[error("Bencode parsing error: {0}")]
-    Bencode(#[from] crate::bencode::Error),
-
-    /// Indicates an I/O related failure.
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// Indicates that an announce URL could not be parsed properly.
-    #[error("URL parsing error: {0}")]
-    InvalidUrl(#[from] url::ParseError),
-
-    /// Indicates a field mandated by the BitTorrent specification is missing.
-    #[error("Missing required field: {0}")]
-    MissingField(String),
-
-    /// Indicates a field was found, but contained an invalid value or data type.
-    #[error("Illegal value in field '{0}'")]
-    IllegalFieldValue(&'static str),
-
-    /// Indicates the concatenated pieces byte string is not a multiple of 20.
-    /// Since SHA-1 hashes are exactly 20 bytes long, this implies data corruption.
-    #[error("Length of the 'pieces' list must be a multiple of 20")]
-    InvalidPiecesLength,
-
-    /// Indicates that neither an `announce` nor `announce-list` field was found.
-    #[error("No announce URLs found")]
-    MissingAnnounce,
-}
-
 pub struct TorrentBuf {
     pub info: InfoBuf,
     pub announce: Option<Url>,
@@ -519,6 +486,39 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfoBuf {
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         FileInfo::try_from(bencode).map(Self::from)
     }
+}
+
+/// Errors that can occur during the parsing and validation of a `.torrent` file.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// Indicates an underlying failure when parsing the Bencode data structure.
+    #[error("Bencode parsing error: {0}")]
+    Bencode(#[from] crate::bencode::Error),
+
+    /// Indicates an I/O related failure.
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Indicates that an announce URL could not be parsed properly.
+    #[error("URL parsing error: {0}")]
+    InvalidUrl(#[from] url::ParseError),
+
+    /// Indicates a field mandated by the BitTorrent specification is missing.
+    #[error("Missing required field: {0}")]
+    MissingField(String),
+
+    /// Indicates a field was found, but contained an invalid value or data type.
+    #[error("Illegal value in field '{0}'")]
+    IllegalFieldValue(&'static str),
+
+    /// Indicates the concatenated pieces byte string is not a multiple of 20.
+    /// Since SHA-1 hashes are exactly 20 bytes long, this implies data corruption.
+    #[error("Length of the 'pieces' list must be a multiple of 20")]
+    InvalidPiecesLength,
+
+    /// Indicates that neither an `announce` nor `announce-list` field was found.
+    #[error("No announce URLs found")]
+    MissingAnnounce,
 }
 
 #[cfg(test)]
