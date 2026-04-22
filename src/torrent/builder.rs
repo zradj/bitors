@@ -1,9 +1,9 @@
 use url::Url;
 
-use crate::torrent::owned::{OwnedInfo, OwnedTorrent};
+use crate::torrent::{InfoBuf, TorrentBuf};
 
 pub struct TorrentBuilder {
-    info: OwnedInfo,
+    info: InfoBuf,
     announce: Option<Url>,
     announce_list: Option<Vec<Vec<Url>>>,
     creation_date: Option<u64>,
@@ -13,7 +13,7 @@ pub struct TorrentBuilder {
 }
 
 impl TorrentBuilder {
-    pub fn new(info: OwnedInfo) -> Self {
+    pub fn new(info: InfoBuf) -> Self {
         Self {
             info,
             announce: None,
@@ -55,12 +55,12 @@ impl TorrentBuilder {
         self
     }
 
-    pub fn build(self) -> Result<OwnedTorrent, super::Error> {
+    pub fn build(self) -> Result<TorrentBuf, super::Error> {
         if !self.info.private && self.announce.is_none() && self.announce_list.is_none() {
             return Err(super::Error::MissingAnnounce);
         }
 
-        Ok(OwnedTorrent {
+        Ok(TorrentBuf {
             info: self.info,
             announce: self.announce,
             announce_list: self.announce_list,

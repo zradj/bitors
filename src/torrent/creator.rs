@@ -3,7 +3,7 @@ use std::{marker::PhantomData, path::PathBuf};
 use thiserror::Error;
 use url::Url;
 
-use crate::torrent::owned::OwnedTorrent;
+use crate::torrent::TorrentBuf;
 
 #[derive(Debug)]
 pub struct TorrentCreator<State> {
@@ -127,7 +127,7 @@ impl TorrentCreator<HasFiles> {
         self
     }
 
-    pub fn create(self) -> Result<OwnedTorrent, Error> {
+    pub fn create(self) -> Result<TorrentBuf, Error> {
         todo!()
     }
 }
