@@ -30,7 +30,7 @@ use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
 /// Encoding a value to bytes:
 /// ```
 /// use bitors::bencode::Bencode;
-/// 
+///
 /// let value = Bencode::Int(42);
 /// assert_eq!(value.encode(), b"i42e");
 /// ```
@@ -293,15 +293,15 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
             map.insert(b"creation date", Self::Int(creation_date as i64));
         }
 
-        if let Some(comment) = torrent.comment {
+        if let Some(comment) = &torrent.comment {
             map.insert(b"comment", Self::Bytes(comment.as_bytes()));
         }
 
-        if let Some(created_by) = torrent.created_by {
+        if let Some(created_by) = &torrent.created_by {
             map.insert(b"created by", Self::Bytes(created_by.as_bytes()));
         }
 
-        if let Some(encoding) = torrent.encoding {
+        if let Some(encoding) = &torrent.encoding {
             map.insert(b"encoding", Self::Bytes(encoding.as_bytes()));
         }
 
@@ -366,7 +366,7 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
             .collect();
         map.insert(b"path", Self::List(path));
 
-        if let Some(md5sum) = file_info.md5sum {
+        if let Some(md5sum) = &file_info.md5sum {
             map.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
         }
 

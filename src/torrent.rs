@@ -1,7 +1,7 @@
 pub mod builder;
 pub mod creator;
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use thiserror::Error;
 use url::Url;
@@ -66,12 +66,12 @@ pub struct Torrent<'a> {
     /// The creation time of the torrent, in standard POSIX epoch format.
     pub creation_date: Option<u64>,
     /// Free-form textual comments of the author.
-    pub comment: Option<&'a str>,
+    pub comment: Option<Cow<'a, str>>,
     /// Name and version of the program used to create the .torrent.
-    pub created_by: Option<&'a str>,
+    pub created_by: Option<Cow<'a, str>>,
     /// The string encoding format used to generate the pieces part of the info dictionary
     /// in the .torrent metainfo file (e.g., "UTF-8").
-    pub encoding: Option<&'a str>,
+    pub encoding: Option<Cow<'a, str>>,
 }
 
 impl<'a> Torrent<'a> {
@@ -89,7 +89,15 @@ impl<'a> Torrent<'a> {
     }
 
     pub fn into_owned(self) -> TorrentBuf {
-        self.into()
+        Torrent {
+            info: self.info.into_owned(),
+            announce: self.announce,
+            announce_list: self.announce_list,
+            creation_date: self.creation_date,
+            comment: self.comment.map(|c| Cow::Owned(c.into_owned())),
+            created_by: self.created_by.map(|c| Cow::Owned(c.into_owned())),
+            encoding: self.encoding.map(|c| Cow::Owned(c.into_owned())),
+        }
     }
 }
 
@@ -138,11 +146,11 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
             })
             .transpose()?;
 
-        let comment = map.opt_str(b"comment")?;
+        let comment = map.opt_str(b"comment")?.map(|s| Cow::Borrowed(s));
 
-        let created_by = map.opt_str(b"created by")?;
+        let created_by = map.opt_str(b"created by")?.map(|s| Cow::Borrowed(s));
 
-        let encoding = map.opt_str(b"encoding")?;
+        let encoding = map.opt_str(b"encoding")?.map(|s| Cow::Borrowed(s));
 
         Ok(Self {
             info,
@@ -156,6 +164,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     }
 }
 
+pub type TorrentBuf = Torrent<'static>;
+
 /// Represents the `info` dictionary within a torrent file.
 ///
 /// This structure holds the critical data describing the payload (the files to download),
@@ -164,11 +174,11 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
 pub struct Info<'a> {
     /// In the single file case, the name of the file.
     /// In the multiple file case, the name of the directory in which to store all the files.
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// The number of bytes in each piece the files are split into.
     pub piece_length: u64,
     /// An array of 20-byte SHA1 hashes, one for each piece in the torrent.
-    pub pieces: &'a [[u8; 20]],
+    pub pieces: Cow<'a, [[u8; 20]]>,
     /// If true, the client must not obtain peer data from the DHT or PEX.
     /// It must only rely on the specified tracker(s).
     pub private: bool,
@@ -183,7 +193,13 @@ impl<'a> Info<'a> {
     }
 
     pub fn into_owned(self) -> InfoBuf {
-        self.into()
+        Info {
+            name: Cow::Owned(self.name.into_owned()),
+            piece_length: self.piece_length,
+            pieces: Cow::Owned(self.pieces.into_owned()),
+            private: self.private,
+            file_mode: self.file_mode.into_owned(),
+        }
     }
 }
 
@@ -232,21 +248,23 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
                 let length = u64::try_from(map.require(b"length")?.as_int()?)
                     .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-                let md5sum = map.opt_str(b"md5sum")?;
+                let md5sum = map.opt_str(b"md5sum")?.map(|s| Cow::Borrowed(s));
 
                 FileMode::Single { length, md5sum }
             }
         };
 
         Ok(Self {
-            name,
+            name: Cow::Borrowed(name),
             piece_length,
-            pieces,
+            pieces: Cow::Borrowed(pieces),
             private,
             file_mode,
         })
     }
 }
+
+pub type InfoBuf = Info<'static>;
 
 /// Defines the structure of the payload contained within the torrent.
 ///
@@ -258,7 +276,7 @@ pub enum FileMode<'a> {
         /// The length of the file in bytes.
         length: u64,
         /// An optional 32-character hexadecimal string corresponding to the MD5 sum of the file.
-        md5sum: Option<&'a str>,
+        md5sum: Option<Cow<'a, str>>,
     },
     /// Represents a torrent containing a directory of multiple files.
     Multi {
@@ -269,9 +287,19 @@ pub enum FileMode<'a> {
 
 impl<'a> FileMode<'a> {
     pub fn into_owned(self) -> FileModeBuf {
-        self.into()
+        match self {
+            Self::Single { length, md5sum } => FileModeBuf::Single {
+                length,
+                md5sum: md5sum.map(|c| Cow::Owned(c.into_owned())),
+            },
+            Self::Multi { files } => FileModeBuf::Multi {
+                files: files.into_iter().map(FileInfo::into_owned).collect(),
+            },
+        }
     }
 }
+
+pub type FileModeBuf = FileMode<'static>;
 
 /// Metadata for a single file within a multi-file torrent.
 #[derive(Debug)]
@@ -279,10 +307,10 @@ pub struct FileInfo<'a> {
     /// The length of the file in bytes.
     pub length: u64,
     /// An optional 32-character hexadecimal string corresponding to the MD5 sum of the file.
-    pub md5sum: Option<&'a str>,
+    pub md5sum: Option<Cow<'a, str>>,
     /// A list containing one or more string elements that together represent the path and filename.
     /// Each element corresponds to a directory name or (for the last element) the filename.
-    pub path: Vec<&'a str>,
+    pub path: Vec<Cow<'a, str>>,
 }
 
 impl<'a> FileInfo<'a> {
@@ -292,7 +320,15 @@ impl<'a> FileInfo<'a> {
     }
 
     pub fn into_owned(self) -> FileInfoBuf {
-        self.into()
+        FileInfo {
+            length: self.length,
+            md5sum: self.md5sum.map(|c| Cow::Owned(c.into_owned())),
+            path: self
+                .path
+                .into_iter()
+                .map(|c| Cow::Owned(c.into_owned()))
+                .collect(),
+        }
     }
 }
 
@@ -310,14 +346,14 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
         let length = u64::try_from(map.require(b"length")?.as_int()?)
             .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-        let md5sum = map.opt_str(b"md5sum")?;
+        let md5sum = map.opt_str(b"md5sum")?.map(|s| Cow::Borrowed(s));
 
         let path = map
             .require(b"path")?
             .as_list()?
             .iter()
-            .map(Bencode::as_str)
-            .collect::<Result<Vec<&str>, _>>()?;
+            .map(|b| b.as_str().map(|s| Cow::Borrowed(s)))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
             length,
@@ -327,166 +363,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
     }
 }
 
-pub struct TorrentBuf {
-    pub info: InfoBuf,
-    pub announce: Option<Url>,
-    pub announce_list: Option<Vec<Vec<Url>>>,
-    pub creation_date: Option<u64>,
-    pub comment: Option<String>,
-    pub created_by: Option<String>,
-    pub encoding: Option<String>,
-}
-
-impl TorrentBuf {
-    pub fn trackers(&self) -> Vec<Vec<&Url>> {
-        match (&self.announce, &self.announce_list) {
-            (Some(url), None) => vec![vec![url]],
-            (_, Some(tiers)) => tiers.iter().map(|tier| tier.iter().collect()).collect(),
-            (None, None) => vec![],
-        }
-    }
-
-    pub fn as_borrowed(&self) -> Torrent<'_> {
-        Torrent {
-            info: self.info.as_borrowed(),
-            announce: self.announce.clone(),
-            announce_list: self.announce_list.clone(),
-            creation_date: self.creation_date,
-            comment: self.comment.as_deref(),
-            created_by: self.created_by.as_deref(),
-            encoding: self.encoding.as_deref(),
-        }
-    }
-}
-
-impl<'a> From<Torrent<'a>> for TorrentBuf {
-    fn from(torrent: Torrent<'a>) -> Self {
-        Self {
-            info: torrent.info.into(),
-            announce: torrent.announce,
-            announce_list: torrent.announce_list,
-            creation_date: torrent.creation_date,
-            comment: torrent.comment.map(String::from),
-            created_by: torrent.created_by.map(String::from),
-            encoding: torrent.encoding.map(String::from),
-        }
-    }
-}
-
-impl<'a> TryFrom<&'a Bencode<'a>> for TorrentBuf {
-    type Error = Error;
-
-    fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
-        Torrent::try_from(bencode).map(Self::from)
-    }
-}
-
-pub struct InfoBuf {
-    pub name: String,
-    pub piece_length: u64,
-    pub pieces: Vec<[u8; 20]>,
-    pub private: bool,
-    pub file_mode: FileModeBuf,
-}
-
-impl InfoBuf {
-    pub fn as_borrowed(&self) -> Info<'_> {
-        Info {
-            name: &self.name,
-            piece_length: self.piece_length,
-            pieces: &self.pieces,
-            private: self.private,
-            file_mode: self.file_mode.as_borrowed(),
-        }
-    }
-}
-
-impl<'a> From<Info<'a>> for InfoBuf {
-    fn from(info: Info<'a>) -> Self {
-        Self {
-            name: info.name.to_string(),
-            piece_length: info.piece_length,
-            pieces: info.pieces.to_vec(),
-            private: info.private,
-            file_mode: info.file_mode.into(),
-        }
-    }
-}
-
-impl<'a> TryFrom<&'a Bencode<'a>> for InfoBuf {
-    type Error = Error;
-
-    fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
-        Info::try_from(bencode).map(Self::from)
-    }
-}
-
-pub enum FileModeBuf {
-    Single { length: u64, md5sum: Option<String> },
-    Multi { files: Vec<FileInfoBuf> },
-}
-
-impl FileModeBuf {
-    pub fn as_borrowed(&self) -> FileMode<'_> {
-        match self {
-            Self::Single { length, md5sum } => FileMode::Single {
-                length: *length,
-                md5sum: md5sum.as_deref(),
-            },
-            Self::Multi { files } => FileMode::Multi {
-                files: files.iter().map(FileInfoBuf::as_borrowed).collect(),
-            },
-        }
-    }
-}
-
-impl<'a> From<FileMode<'a>> for FileModeBuf {
-    fn from(file_mode: FileMode<'a>) -> Self {
-        match file_mode {
-            FileMode::Single { length, md5sum } => Self::Single {
-                length,
-                md5sum: md5sum.map(String::from),
-            },
-            FileMode::Multi { files } => Self::Multi {
-                files: files.into_iter().map(FileInfoBuf::from).collect(),
-            },
-        }
-    }
-}
-
-pub struct FileInfoBuf {
-    pub length: u64,
-    pub md5sum: Option<String>,
-    pub path: Vec<String>,
-}
-
-impl FileInfoBuf {
-    pub fn as_borrowed(&self) -> FileInfo<'_> {
-        FileInfo {
-            length: self.length,
-            md5sum: self.md5sum.as_deref(),
-            path: self.path.iter().map(|s| s.as_str()).collect(),
-        }
-    }
-}
-
-impl<'a> From<FileInfo<'a>> for FileInfoBuf {
-    fn from(file_info: FileInfo<'a>) -> Self {
-        Self {
-            length: file_info.length,
-            md5sum: file_info.md5sum.map(String::from),
-            path: file_info.path.into_iter().map(String::from).collect(),
-        }
-    }
-}
-
-impl<'a> TryFrom<&'a Bencode<'a>> for FileInfoBuf {
-    type Error = Error;
-
-    fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
-        FileInfo::try_from(bencode).map(Self::from)
-    }
-}
+pub type FileInfoBuf = FileInfo<'static>;
 
 /// Errors that can occur during the parsing and validation of a `.torrent` file.
 #[derive(Debug, Error)]

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use url::Url;
 
 use crate::torrent::{InfoBuf, TorrentBuf};
@@ -65,9 +67,9 @@ impl TorrentBuilder {
             announce: self.announce,
             announce_list: self.announce_list,
             creation_date: self.creation_date,
-            comment: self.comment,
-            created_by: self.created_by,
-            encoding: self.encoding,
+            comment: self.comment.map(|s| Cow::Owned(s)),
+            created_by: self.created_by.map(|s| Cow::Owned(s)),
+            encoding: self.encoding.map(|s| Cow::Owned(s)),
         })
     }
 }
