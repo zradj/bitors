@@ -89,7 +89,7 @@ impl<'a> Torrent<'a> {
     }
 
     pub fn into_owned(self) -> TorrentBuf {
-        Torrent {
+        TorrentBuf {
             info: self.info.into_owned(),
             announce: self.announce,
             announce_list: self.announce_list,
@@ -146,11 +146,11 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
             })
             .transpose()?;
 
-        let comment = map.opt_str(b"comment")?.map(|s| Cow::Borrowed(s));
+        let comment = map.opt_str(b"comment")?.map(Cow::Borrowed);
 
-        let created_by = map.opt_str(b"created by")?.map(|s| Cow::Borrowed(s));
+        let created_by = map.opt_str(b"created by")?.map(Cow::Borrowed);
 
-        let encoding = map.opt_str(b"encoding")?.map(|s| Cow::Borrowed(s));
+        let encoding = map.opt_str(b"encoding")?.map(Cow::Borrowed);
 
         Ok(Self {
             info,
@@ -193,7 +193,7 @@ impl<'a> Info<'a> {
     }
 
     pub fn into_owned(self) -> InfoBuf {
-        Info {
+        InfoBuf {
             name: Cow::Owned(self.name.into_owned()),
             piece_length: self.piece_length,
             pieces: Cow::Owned(self.pieces.into_owned()),
@@ -248,7 +248,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
                 let length = u64::try_from(map.require(b"length")?.as_int()?)
                     .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-                let md5sum = map.opt_str(b"md5sum")?.map(|s| Cow::Borrowed(s));
+                let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
 
                 FileMode::Single { length, md5sum }
             }
@@ -320,7 +320,7 @@ impl<'a> FileInfo<'a> {
     }
 
     pub fn into_owned(self) -> FileInfoBuf {
-        FileInfo {
+        FileInfoBuf {
             length: self.length,
             md5sum: self.md5sum.map(|c| Cow::Owned(c.into_owned())),
             path: self
@@ -346,13 +346,13 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
         let length = u64::try_from(map.require(b"length")?.as_int()?)
             .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-        let md5sum = map.opt_str(b"md5sum")?.map(|s| Cow::Borrowed(s));
+        let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
 
         let path = map
             .require(b"path")?
             .as_list()?
             .iter()
-            .map(|b| b.as_str().map(|s| Cow::Borrowed(s)))
+            .map(|b| b.as_str().map(Cow::Borrowed))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(info.name, "ubuntu.iso");
         assert_eq!(info.piece_length, 262144);
         assert_eq!(info.pieces.len(), 1); // 1 chunk of 20 bytes
-        assert_eq!(info.private, false);
+        assert!(!info.private);
 
         match info.file_mode {
             FileMode::Single { length, md5sum } => {

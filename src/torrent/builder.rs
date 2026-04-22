@@ -67,9 +67,9 @@ impl TorrentBuilder {
             announce: self.announce,
             announce_list: self.announce_list,
             creation_date: self.creation_date,
-            comment: self.comment.map(|s| Cow::Owned(s)),
-            created_by: self.created_by.map(|s| Cow::Owned(s)),
-            encoding: self.encoding.map(|s| Cow::Owned(s)),
+            comment: self.comment.map(Cow::Owned),
+            created_by: self.created_by.map(Cow::Owned),
+            encoding: self.encoding.map(Cow::Owned),
         })
     }
 }

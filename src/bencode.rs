@@ -579,10 +579,10 @@ impl<'a> Parser<'a> {
                 _ => return Err(Error::NonStringKey),
             };
 
-            if let Some(prev) = last_key {
-                if key <= prev {
-                    return Err(Error::UnsortedDictKeys);
-                }
+            if let Some(prev) = last_key
+                && key <= prev
+            {
+                return Err(Error::UnsortedDictKeys);
             }
 
             last_key = Some(key);

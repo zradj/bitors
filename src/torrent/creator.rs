@@ -66,6 +66,12 @@ impl<T> TorrentCreator<T> {
     }
 }
 
+impl Default for TorrentCreator<Empty> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TorrentCreator<Empty> {
     pub fn new() -> Self {
         Self {
