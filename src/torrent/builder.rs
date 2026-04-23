@@ -15,6 +15,7 @@ pub struct TorrentBuilder {
 }
 
 impl TorrentBuilder {
+    #[must_use]
     pub fn new(info: InfoBuf) -> Self {
         Self {
             info,
@@ -27,31 +28,37 @@ impl TorrentBuilder {
         }
     }
 
+    #[must_use]
     pub fn announce(mut self, announce: Url) -> Self {
         self.announce = Some(announce);
         self
     }
 
+    #[must_use]
     pub fn announce_list(mut self, announce_list: Vec<Vec<Url>>) -> Self {
         self.announce_list = Some(announce_list);
         self
     }
 
+    #[must_use]
     pub fn creation_date(mut self, creation_date: u64) -> Self {
         self.creation_date = Some(creation_date);
         self
     }
 
+    #[must_use]
     pub fn comment(mut self, comment: &str) -> Self {
         self.comment = Some(comment.to_string());
         self
     }
 
+    #[must_use]
     pub fn created_by(mut self, created_by: &str) -> Self {
         self.created_by = Some(created_by.to_string());
         self
     }
 
+    #[must_use]
     pub fn encoding(mut self, encoding: &str) -> Self {
         self.encoding = Some(encoding.to_string());
         self

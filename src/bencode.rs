@@ -150,8 +150,10 @@ impl<'a> Bencode<'a> {
     /// reallocations. Prefer [`encode_extend`](Self::encode_extend) when appending
     /// into an existing buffer, or [`encode_to_writer`](Self::encode_to_writer)
     /// when writing directly to an I/O sink.
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.encoded_len());
+        #[expect(clippy::missing_panics_doc, reason = "infallible")]
         self.encode_to_writer(&mut buf)
             .expect("Writing to Vec should not fail");
         buf
@@ -164,6 +166,7 @@ impl<'a> Bencode<'a> {
     /// building up a larger buffer incrementally from multiple values.
     pub fn encode_extend(&self, buf: &mut Vec<u8>) {
         buf.reserve_exact(self.encoded_len());
+        #[expect(clippy::missing_panics_doc, reason = "infallible")]
         self.encode_to_writer(buf)
             .expect("Writing to Vec should not fail");
     }
@@ -229,15 +232,13 @@ impl<'a> Bencode<'a> {
 /// Accounts for the `i` prefix, the `e` suffix, an optional leading `-` for
 /// negative values, and the number of decimal digits in the absolute value.
 fn encoded_int_len(i: i64) -> usize {
-    if i == 0 {
+    match i {
         // i0e
-        3
-    } else if i < 0 {
+        0 => 3,
         // i-<abs>e
-        3 + (1 + i.unsigned_abs().ilog10() as usize)
-    } else {
+        n if n < 0 => 3 + (1 + n.unsigned_abs().ilog10() as usize),
         // i<num>e
-        2 + (1 + i.ilog10() as usize)
+        n => 2 + (1 + n.ilog10() as usize),
     }
 }
 
@@ -322,7 +323,7 @@ impl<'a> From<&'a Info<'a>> for Bencode<'a> {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
         map.insert(b"name", Self::Bytes(info.name.as_bytes()));
-        map.insert(b"piece length", Self::Int(info.piece_length as i64));
+        map.insert(b"piece length", Self::Int(info.piece_length.get() as i64));
         map.insert(b"pieces", Self::Bytes(info.pieces.as_flattened()));
 
         if info.private {
@@ -410,6 +411,7 @@ impl<'a> Parser<'a> {
     /// Creates a new `Parser` with the default maximum nesting depth of 64.
     ///
     /// Use [`with_max_depth`](Self::with_max_depth) if you need a different limit.
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self::with_max_depth(data, 64)
     }
@@ -419,6 +421,7 @@ impl<'a> Parser<'a> {
     /// Nesting depth is incremented each time the parser enters a list or
     /// dictionary, and checked before recursing further. Setting `max_depth`
     /// to `0` prevents any list or dictionary from being parsed.
+    #[must_use]
     pub fn with_max_depth(data: &'a [u8], max_depth: usize) -> Self {
         Self {
             data,
@@ -452,6 +455,7 @@ impl<'a> Parser<'a> {
     ///
     /// Panics if `start` is greater than the current cursor position, or if
     /// either index is out of bounds for the source buffer.
+    #[must_use]
     pub fn raw_span(&self, start: usize) -> &'a [u8] {
         &self.data[start..self.cursor]
     }
@@ -462,6 +466,7 @@ impl<'a> Parser<'a> {
     /// Useful in combination with [`raw_span`](Self::raw_span) to capture
     /// the start position before a `parse` call and then retrieve the exact
     /// bytes it consumed.
+    #[must_use]
     pub fn position(&self) -> usize {
         self.cursor
     }
@@ -574,9 +579,8 @@ impl<'a> Parser<'a> {
         let mut last_key = None;
 
         while self.peek()? != b'e' {
-            let key = match self.parse_internal(depth + 1)? {
-                Bencode::Bytes(b) => b,
-                _ => return Err(Error::NonStringKey),
+            let Bencode::Bytes(key) = self.parse_internal(depth + 1)? else {
+                return Err(Error::NonStringKey);
             };
 
             if let Some(prev) = last_key

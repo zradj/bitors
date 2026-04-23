@@ -1,7 +1,7 @@
 pub mod builder;
 pub mod factory;
 
-use std::{borrow::Cow, collections::BTreeMap, path::PathBuf};
+use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU64, path::PathBuf};
 
 use thiserror::Error;
 use url::Url;
@@ -74,7 +74,8 @@ pub struct Torrent<'a> {
     pub encoding: Option<Cow<'a, str>>,
 }
 
-impl<'a> Torrent<'a> {
+impl Torrent<'_> {
+    #[must_use]
     pub fn trackers(&self) -> Vec<Vec<&Url>> {
         match (&self.announce, &self.announce_list) {
             (Some(url), None) => vec![vec![url]],
@@ -84,10 +85,12 @@ impl<'a> Torrent<'a> {
     }
 
     /// Converts the `Torrent` struct back into a `Bencode` representation.
+    #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
     }
 
+    #[must_use]
     pub fn into_owned(self) -> TorrentBuf {
         TorrentBuf {
             info: self.info.into_owned(),
@@ -176,7 +179,7 @@ pub struct Info<'a> {
     /// In the multiple file case, the name of the directory in which to store all the files.
     pub name: Cow<'a, str>,
     /// The number of bytes in each piece the files are split into.
-    pub piece_length: u64,
+    pub piece_length: NonZeroU64,
     /// An array of 20-byte SHA1 hashes, one for each piece in the torrent.
     pub pieces: Cow<'a, [[u8; 20]]>,
     /// If true, the client must not obtain peer data from the DHT or PEX.
@@ -186,12 +189,14 @@ pub struct Info<'a> {
     pub file_mode: FileMode<'a>,
 }
 
-impl<'a> Info<'a> {
+impl Info<'_> {
     /// Converts the `Info` struct back into a `Bencode` representation.
+    #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
     }
 
+    #[must_use]
     pub fn into_owned(self) -> InfoBuf {
         InfoBuf {
             name: Cow::Owned(self.name.into_owned()),
@@ -218,7 +223,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
         let name = map.require_str(b"name")?;
 
         let piece_length = u64::try_from(map.require(b"piece length")?.as_int()?)
-            .map_err(|_| Error::IllegalFieldValue("piece length"))?;
+            .map_err(|_| Error::IllegalFieldValue("piece length"))
+            .and_then(|n| NonZeroU64::new(n).ok_or(Error::IllegalFieldValue("piece length")))?;
 
         let pieces = map.require(b"pieces")?.as_bytes()?;
         let (pieces, []) = pieces.as_chunks() else {
@@ -234,24 +240,21 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
             None => false,
         };
 
-        let file_mode = match map.opt(b"files") {
-            Some(b) => {
-                let files = b
-                    .as_list()?
-                    .iter()
-                    .map(FileInfo::try_from)
-                    .collect::<Result<Vec<FileInfo>, _>>()?;
+        let file_mode = if let Some(b) = map.opt(b"files") {
+            let files = b
+                .as_list()?
+                .iter()
+                .map(FileInfo::try_from)
+                .collect::<Result<Vec<FileInfo>, _>>()?;
 
-                FileMode::Multi { files }
-            }
-            None => {
-                let length = u64::try_from(map.require(b"length")?.as_int()?)
-                    .map_err(|_| Error::IllegalFieldValue("length"))?;
+            FileMode::Multi { files }
+        } else {
+            let length = u64::try_from(map.require(b"length")?.as_int()?)
+                .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-                let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
+            let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
 
-                FileMode::Single { length, md5sum }
-            }
+            FileMode::Single { length, md5sum }
         };
 
         Ok(Self {
@@ -285,11 +288,13 @@ pub enum FileMode<'a> {
     },
 }
 
-impl<'a> FileMode<'a> {
+impl FileMode<'_> {
+    #[must_use]
     pub fn is_single(&self) -> bool {
         matches!(self, Self::Single { .. })
     }
 
+    #[must_use]
     pub fn is_multi(&self) -> bool {
         !self.is_single()
     }
@@ -321,7 +326,8 @@ pub struct FileInfo<'a> {
     pub path: Vec<Cow<'a, str>>,
 }
 
-impl<'a> FileInfo<'a> {
+impl FileInfo<'_> {
+    #[must_use]
     pub fn full_path(&self) -> PathBuf {
         let mut full_path = PathBuf::new();
         self.path
@@ -330,10 +336,12 @@ impl<'a> FileInfo<'a> {
         full_path
     }
     /// Converts the `FileInfo` struct back into a `Bencode` representation.
+    #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
     }
 
+    #[must_use]
     pub fn into_owned(self) -> FileInfoBuf {
         FileInfoBuf {
             length: self.length,
@@ -427,25 +435,25 @@ mod tests {
     fn test_parse_single_file_info() {
         let mut map = BTreeMap::new();
         map.insert(&b"name"[..], Bencode::Bytes(b"ubuntu.iso"));
-        map.insert(&b"piece length"[..], Bencode::Int(262144));
+        map.insert(&b"piece length"[..], Bencode::Int(262_144));
         let pieces = dummy_pieces();
         map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
-        map.insert(&b"length"[..], Bencode::Int(1024000));
+        map.insert(&b"length"[..], Bencode::Int(1_024_000));
 
         let bencode = Bencode::Dict(map);
         let info = Info::try_from(&bencode).expect("Failed to parse valid single-file info");
 
         assert_eq!(info.name, "ubuntu.iso");
-        assert_eq!(info.piece_length, 262144);
+        assert_eq!(info.piece_length, NonZeroU64::new(262_144).unwrap());
         assert_eq!(info.pieces.len(), 1); // 1 chunk of 20 bytes
         assert!(!info.private);
 
         match info.file_mode {
             FileMode::Single { length, md5sum } => {
-                assert_eq!(length, 1024000);
+                assert_eq!(length, 1_024_000);
                 assert_eq!(md5sum, None);
             }
-            _ => panic!("Expected FileMode::Single"),
+            FileMode::Multi { .. } => panic!("Expected FileMode::Single"),
         }
     }
 
@@ -461,7 +469,7 @@ mod tests {
         // Build the main Info dict
         let mut map = BTreeMap::new();
         map.insert(&b"name"[..], Bencode::Bytes(b"my_folder"));
-        map.insert(&b"piece length"[..], Bencode::Int(262144));
+        map.insert(&b"piece length"[..], Bencode::Int(262_144));
         let pieces = dummy_pieces();
         map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
         map.insert(&b"files"[..], Bencode::List(vec![file_bencode]));
@@ -477,7 +485,7 @@ mod tests {
                 assert_eq!(files[0].length, 512);
                 assert_eq!(files[0].path, vec!["docs", "readme.txt"]);
             }
-            _ => panic!("Expected FileMode::Multi"),
+            FileMode::Single { .. } => panic!("Expected FileMode::Multi"),
         }
     }
 
@@ -485,7 +493,7 @@ mod tests {
     fn test_invalid_pieces_length() {
         let mut map = BTreeMap::new();
         map.insert(&b"name"[..], Bencode::Bytes(b"test"));
-        map.insert(&b"piece length"[..], Bencode::Int(262144));
+        map.insert(&b"piece length"[..], Bencode::Int(262_144));
         map.insert(&b"length"[..], Bencode::Int(1024));
 
         // 21 bytes is invalid (must be multiple of 20)
@@ -504,7 +512,7 @@ mod tests {
         // Build a valid Info dict
         let mut info_map = BTreeMap::new();
         info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
-        info_map.insert(&b"piece length"[..], Bencode::Int(262144));
+        info_map.insert(&b"piece length"[..], Bencode::Int(262_144));
         info_map.insert(&b"length"[..], Bencode::Int(1024));
         let pieces = dummy_pieces();
         info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
@@ -524,7 +532,7 @@ mod tests {
     fn test_parse_valid_torrent() {
         let mut info_map = BTreeMap::new();
         info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
-        info_map.insert(&b"piece length"[..], Bencode::Int(262144));
+        info_map.insert(&b"piece length"[..], Bencode::Int(262_144));
         info_map.insert(&b"length"[..], Bencode::Int(1024));
         let pieces = dummy_pieces();
         info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
@@ -536,7 +544,7 @@ mod tests {
             Bencode::Bytes(b"http://tracker.example.com/announce"),
         );
         torrent_map.insert(&b"created by"[..], Bencode::Bytes(b"MyTorrentClient/1.0"));
-        torrent_map.insert(&b"creation date"[..], Bencode::Int(1620000000));
+        torrent_map.insert(&b"creation date"[..], Bencode::Int(1_620_000_000));
 
         let bencode = Bencode::Dict(torrent_map);
         let torrent = Torrent::try_from(&bencode).expect("Failed to parse valid torrent");
@@ -546,7 +554,7 @@ mod tests {
             "http://tracker.example.com/announce"
         );
         assert_eq!(torrent.created_by.unwrap(), "MyTorrentClient/1.0");
-        assert_eq!(torrent.creation_date.unwrap(), 1620000000);
+        assert_eq!(torrent.creation_date.unwrap(), 1_620_000_000);
         assert_eq!(torrent.info.name, "test");
     }
 
@@ -554,7 +562,7 @@ mod tests {
     fn test_announce_list() {
         let mut info_map = BTreeMap::new();
         info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
-        info_map.insert(&b"piece length"[..], Bencode::Int(262144));
+        info_map.insert(&b"piece length"[..], Bencode::Int(262_144));
         info_map.insert(&b"length"[..], Bencode::Int(1024));
         let pieces = dummy_pieces();
         info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));

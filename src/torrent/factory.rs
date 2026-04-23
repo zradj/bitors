@@ -3,6 +3,7 @@ use std::{
     fs::File,
     io::{self, BufReader, Read},
     marker::PhantomData,
+    num::NonZeroU64,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +26,7 @@ mod state {
 pub struct TorrentFactory<State> {
     files: Vec<PathBuf>,
     name: Option<String>,
-    piece_length: Option<u64>,
+    piece_length: Option<NonZeroU64>,
     private: bool,
     announce_list: Vec<Vec<Url>>,
     creation_date: Option<u64>,
@@ -35,46 +36,55 @@ pub struct TorrentFactory<State> {
 }
 
 impl<T> TorrentFactory<T> {
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
-    pub fn piece_length(mut self, piece_length: u64) -> Self {
+    #[must_use]
+    pub fn piece_length(mut self, piece_length: NonZeroU64) -> Self {
         self.piece_length = Some(piece_length);
         self
     }
 
+    #[must_use]
     pub fn private(mut self) -> Self {
         self.private = true;
         self
     }
 
+    #[must_use]
     pub fn creation_date(mut self, creation_date: u64) -> Self {
         self.creation_date = Some(creation_date);
         self
     }
 
+    #[must_use]
     pub fn created_by(mut self, created_by: impl Into<String>) -> Self {
         self.created_by = Some(created_by.into());
         self
     }
 
+    #[must_use]
     pub fn comment(mut self, comment: impl Into<String>) -> Self {
         self.comment = Some(comment.into());
         self
     }
 
+    #[must_use]
     pub fn add_announce(mut self, announce: Url) -> Self {
         self.get_last_announce_tier().push(announce);
         self
     }
 
+    #[must_use]
     pub fn add_announces<I: IntoIterator<Item = Url>>(mut self, announces: I) -> Self {
         self.get_last_announce_tier().extend(announces);
         self
     }
 
+    #[must_use]
     pub fn next_announce_tier(mut self) -> Self {
         if !self.get_last_announce_tier().is_empty() {
             self.announce_list.push(vec![]);
@@ -205,18 +215,22 @@ impl TorrentFactory<state::HasFiles> {
         }
     }
 
+    #[must_use]
     pub fn add_file(mut self, file: impl Into<PathBuf>) -> Self {
         self.files.push(file.into());
         self
     }
 
+    #[must_use]
     pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(mut self, files: I) -> Self {
         self.files.extend(files.into_iter().map(Into::into));
         self
     }
 
     pub fn create(self) -> Result<TorrentBuf, Error> {
-        let piece_length = self.piece_length.unwrap_or(512 * 1024);
+        let piece_length = self
+            .piece_length
+            .unwrap_or(NonZeroU64::new(512 * 1024).unwrap());
         let creation_date = self.creation_date.unwrap_or(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -260,7 +274,7 @@ impl TorrentFactory<state::HasFiles> {
             .collect::<Result<Vec<_>, _>>()?;
 
         // TODO: replace `as` with something better (maybe change the data type in the struct?)
-        let pieces = Self::compute_piece_hashes(files, piece_length as usize)?;
+        let pieces = Self::compute_piece_hashes(files, piece_length.get() as usize)?;
 
         let name = match self.name {
             Some(name) => name,
