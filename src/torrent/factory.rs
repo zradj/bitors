@@ -105,14 +105,14 @@ impl TorrentFactory<state::Empty> {
         self,
         files: I,
     ) -> Result<TorrentFactory<state::HasFiles>, Error> {
-        let files = files.into_iter().collect::<Vec<_>>();
+        let mut iter = files.into_iter().peekable();
 
-        if files.is_empty() {
+        if iter.peek().is_none() {
             return Err(Error::NoFiles);
         }
 
         Ok(TorrentFactory {
-            files,
+            files: iter.collect(),
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
