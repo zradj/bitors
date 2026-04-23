@@ -1,5 +1,5 @@
 pub mod builder;
-pub mod creator;
+pub mod factory;
 
 use std::{borrow::Cow, collections::BTreeMap};
 

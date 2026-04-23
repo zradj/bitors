@@ -5,8 +5,15 @@ use url::Url;
 
 use crate::torrent::TorrentBuf;
 
+mod state {
+    #[derive(Debug)]
+    pub struct Empty;
+    #[derive(Debug)]
+    pub struct HasFiles;
+}
+
 #[derive(Debug)]
-pub struct TorrentCreator<State> {
+pub struct TorrentFactory<State> {
     files: Vec<PathBuf>,
     name: Option<String>,
     piece_length: Option<u64>,
@@ -17,12 +24,7 @@ pub struct TorrentCreator<State> {
     _state: PhantomData<State>,
 }
 
-#[derive(Debug)]
-pub struct Empty;
-#[derive(Debug)]
-pub struct HasFiles;
-
-impl<T> TorrentCreator<T> {
+impl<T> TorrentFactory<T> {
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -66,13 +68,13 @@ impl<T> TorrentCreator<T> {
     }
 }
 
-impl Default for TorrentCreator<Empty> {
+impl Default for TorrentFactory<state::Empty> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TorrentCreator<Empty> {
+impl TorrentFactory<state::Empty> {
     pub fn new() -> Self {
         Self {
             files: vec![],
@@ -86,8 +88,8 @@ impl TorrentCreator<Empty> {
         }
     }
 
-    pub fn add_file(self, file: PathBuf) -> TorrentCreator<HasFiles> {
-        TorrentCreator {
+    pub fn add_file(self, file: PathBuf) -> TorrentFactory<state::HasFiles> {
+        TorrentFactory {
             files: vec![file],
             name: self.name,
             piece_length: self.piece_length,
@@ -102,14 +104,14 @@ impl TorrentCreator<Empty> {
     pub fn add_files<I: IntoIterator<Item = PathBuf>>(
         self,
         files: I,
-    ) -> Result<TorrentCreator<HasFiles>, Error> {
+    ) -> Result<TorrentFactory<state::HasFiles>, Error> {
         let files = files.into_iter().collect::<Vec<_>>();
 
         if files.is_empty() {
             return Err(Error::NoFiles);
         }
 
-        Ok(TorrentCreator {
+        Ok(TorrentFactory {
             files,
             name: self.name,
             piece_length: self.piece_length,
@@ -122,7 +124,7 @@ impl TorrentCreator<Empty> {
     }
 }
 
-impl TorrentCreator<HasFiles> {
+impl TorrentFactory<state::HasFiles> {
     pub fn add_file(mut self, file: PathBuf) -> Self {
         self.files.push(file);
         self
