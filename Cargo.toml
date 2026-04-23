@@ -6,5 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "A Rust BitTorrent client (in the making)"
 
 [dependencies]
+sha1 = "0.11.0"
 thiserror = "2.0.18"
 url = "2.5.8"
+walkdir = "2.5.0"

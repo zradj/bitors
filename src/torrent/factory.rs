@@ -2,6 +2,7 @@ use std::{marker::PhantomData, path::PathBuf};
 
 use thiserror::Error;
 use url::Url;
+use walkdir::WalkDir;
 
 use crate::torrent::TorrentBuf;
 
@@ -95,9 +96,18 @@ impl TorrentFactory<state::Empty> {
         }
     }
 
-    pub fn add_file(self, file: PathBuf) -> TorrentFactory<state::HasFiles> {
-        TorrentFactory {
-            files: vec![file],
+    pub fn add_file(
+        self,
+        file: impl Into<PathBuf>,
+    ) -> Result<TorrentFactory<state::HasFiles>, Error> {
+        let path = file.into();
+
+        if !path.is_file() {
+            return Err(Error::NotAFile(path));
+        }
+
+        Ok(TorrentFactory {
+            files: vec![path],
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
@@ -105,10 +115,10 @@ impl TorrentFactory<state::Empty> {
             creation_date: self.creation_date,
             comment: self.comment,
             _state: PhantomData,
-        }
+        })
     }
 
-    pub fn add_files<I: IntoIterator<Item = PathBuf>>(
+    pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(
         self,
         files: I,
     ) -> Result<TorrentFactory<state::HasFiles>, Error> {
@@ -119,7 +129,7 @@ impl TorrentFactory<state::Empty> {
         }
 
         Ok(TorrentFactory {
-            files: iter.collect(),
+            files: iter.map(Into::into).collect(),
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
@@ -132,13 +142,58 @@ impl TorrentFactory<state::Empty> {
 }
 
 impl TorrentFactory<state::HasFiles> {
-    pub fn add_file(mut self, file: PathBuf) -> Self {
-        self.files.push(file);
+    pub fn from_file(file: impl Into<PathBuf>) -> Result<Self, Error> {
+        TorrentFactory::new().add_file(file)
+    }
+
+    pub fn from_files<I: IntoIterator<Item = impl Into<PathBuf>>>(files: I) -> Result<Self, Error> {
+        TorrentFactory::new().add_files(files)
+    }
+
+    pub fn from_directory(dir: impl Into<PathBuf>) -> Result<Self, Error> {
+        let path = dir.into();
+
+        if !path.is_dir() {
+            return Err(Error::NotADir(path));
+        }
+
+        let name = path
+            .file_name()
+            .ok_or(Error::InvalidPath)?
+            .to_str()
+            .ok_or(Error::NonUtf8Name)?
+            .to_owned();
+
+        let files = WalkDir::new(&path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .collect::<Vec<_>>();
+
+        if files.is_empty() {
+            Err(Error::EmptyDir)
+        } else {
+            Ok(Self {
+                files,
+                name: Some(name),
+                piece_length: None,
+                private: false,
+                announce_list: vec![],
+                creation_date: None,
+                comment: None,
+                _state: PhantomData,
+            })
+        }
+    }
+
+    pub fn add_file(mut self, file: impl Into<PathBuf>) -> Self {
+        self.files.push(file.into());
         self
     }
 
-    pub fn add_files<I: IntoIterator<Item = PathBuf>>(mut self, files: I) -> Self {
-        self.files.extend(files);
+    pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(mut self, files: I) -> Self {
+        self.files.extend(files.into_iter().map(Into::into));
         self
     }
 
@@ -149,6 +204,18 @@ impl TorrentFactory<state::HasFiles> {
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("No files were provided to the creator")]
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("No files were provided to the factory")]
     NoFiles,
+    #[error("An empty directory was provided to the factory")]
+    EmptyDir,
+    #[error("Path has no file name component")]
+    InvalidPath,
+    #[error("File/directory name is not valid UTF-8")]
+    NonUtf8Name,
+    #[error("The provided path does not correspond to a file: {0}")]
+    NotAFile(PathBuf),
+    #[error("The provided path does not correspond to a directory: {0}")]
+    NotADir(PathBuf),
 }
