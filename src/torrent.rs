@@ -1,7 +1,7 @@
 pub mod builder;
 pub mod factory;
 
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{borrow::Cow, collections::BTreeMap, path::PathBuf};
 
 use thiserror::Error;
 use url::Url;
@@ -286,6 +286,14 @@ pub enum FileMode<'a> {
 }
 
 impl<'a> FileMode<'a> {
+    pub fn is_single(&self) -> bool {
+        matches!(self, Self::Single { .. })
+    }
+
+    pub fn is_multi(&self) -> bool {
+        !self.is_single()
+    }
+
     pub fn into_owned(self) -> FileModeBuf {
         match self {
             Self::Single { length, md5sum } => FileModeBuf::Single {
@@ -314,6 +322,13 @@ pub struct FileInfo<'a> {
 }
 
 impl<'a> FileInfo<'a> {
+    pub fn full_path(&self) -> PathBuf {
+        let mut full_path = PathBuf::new();
+        self.path
+            .iter()
+            .for_each(|comp| full_path.push(comp.to_string()));
+        full_path
+    }
     /// Converts the `FileInfo` struct back into a `Bencode` representation.
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
