@@ -51,20 +51,27 @@ impl<T> TorrentFactory<T> {
     }
 
     pub fn add_announce(mut self, announce: Url) -> Self {
-        self.announce_list.last_mut().unwrap().push(announce);
+        self.get_last_announce_tier().push(announce);
         self
     }
 
     pub fn add_announces<I: IntoIterator<Item = Url>>(mut self, announces: I) -> Self {
-        self.announce_list.last_mut().unwrap().extend(announces);
+        self.get_last_announce_tier().extend(announces);
         self
     }
 
     pub fn next_announce_tier(mut self) -> Self {
-        if !self.announce_list.last().unwrap().is_empty() {
+        if !self.get_last_announce_tier().is_empty() {
             self.announce_list.push(vec![]);
         }
         self
+    }
+
+    fn get_last_announce_tier(&mut self) -> &mut Vec<Url> {
+        if self.announce_list.is_empty() {
+            self.announce_list.push(vec![]);
+        }
+        self.announce_list.last_mut().unwrap()
     }
 }
 
@@ -81,7 +88,7 @@ impl TorrentFactory<state::Empty> {
             name: None,
             piece_length: None,
             private: false,
-            announce_list: vec![vec![]],
+            announce_list: vec![],
             creation_date: None,
             comment: None,
             _state: PhantomData,
