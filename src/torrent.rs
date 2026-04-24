@@ -145,7 +145,9 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
         let creation_date = map
             .opt(b"creation date")
             .map(|b| -> Result<u64, Error> {
-                u64::try_from(b.as_int()?).map_err(|_| Error::IllegalFieldValue("creation date"))
+                b.as_int()?
+                    .try_into()
+                    .map_err(|_| Error::IllegalFieldValue("creation date"))
             })
             .transpose()?;
 
@@ -222,9 +224,13 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
 
         let name = map.require_str(b"name")?;
 
-        let piece_length = u64::try_from(map.require(b"piece length")?.as_int()?)
-            .map_err(|_| Error::IllegalFieldValue("piece length"))
-            .and_then(|n| NonZeroU64::new(n).ok_or(Error::IllegalFieldValue("piece length")))?;
+        let piece_length = map
+            .require(b"piece length")?
+            .as_int()?
+            .try_into()
+            .ok()
+            .and_then(NonZeroU64::new)
+            .ok_or(Error::IllegalFieldValue("piece length"))?;
 
         let pieces = map.require(b"pieces")?.as_bytes()?;
         let (pieces, []) = pieces.as_chunks() else {
@@ -249,7 +255,10 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
 
             FileMode::Multi { files }
         } else {
-            let length = u64::try_from(map.require(b"length")?.as_int()?)
+            let length = map
+                .require(b"length")?
+                .as_int()?
+                .try_into()
                 .map_err(|_| Error::IllegalFieldValue("length"))?;
 
             let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
@@ -366,7 +375,10 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
 
-        let length = u64::try_from(map.require(b"length")?.as_int()?)
+        let length = map
+            .require(b"length")?
+            .as_int()?
+            .try_into()
             .map_err(|_| Error::IllegalFieldValue("length"))?;
 
         let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
