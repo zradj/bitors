@@ -15,11 +15,18 @@ use walkdir::WalkDir;
 
 use crate::torrent::{FileInfo, FileMode, Info, Torrent, TorrentBuf};
 
-mod state {
+pub mod state {
     #[derive(Debug)]
     pub struct Empty;
     #[derive(Debug)]
     pub struct HasFiles;
+}
+
+fn piece_length_usize(piece_length: NonZeroU64) -> Result<usize, Error> {
+    piece_length
+        .get()
+        .try_into()
+        .map_err(|_| Error::PieceLengthTooLarge(piece_length))
 }
 
 #[derive(Debug)]
@@ -107,6 +114,7 @@ impl Default for TorrentFactory<state::Empty> {
 }
 
 impl TorrentFactory<state::Empty> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             files: vec![],
@@ -274,7 +282,7 @@ impl TorrentFactory<state::HasFiles> {
             .collect::<Result<Vec<_>, _>>()?;
 
         // TODO: replace `as` with something better (maybe change the data type in the struct?)
-        let pieces = Self::compute_piece_hashes(files, piece_length.get() as usize)?;
+        let pieces = Self::compute_piece_hashes(files, piece_length_usize(piece_length)?)?;
 
         let name = match self.name {
             Some(name) => name,
@@ -389,4 +397,6 @@ pub enum Error {
     NotAFile(PathBuf),
     #[error("The provided path does not correspond to a directory: {0}")]
     NotADir(PathBuf),
+    #[error("The provided piece length is too large (does not fit in usize): {0}")]
+    PieceLengthTooLarge(NonZeroU64),
 }

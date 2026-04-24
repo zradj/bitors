@@ -6,7 +6,13 @@ use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU64, path::PathBuf};
 use thiserror::Error;
 use url::Url;
 
-use crate::bencode::Bencode;
+use crate::{
+    bencode::Bencode,
+    torrent::{
+        builder::TorrentBuilder,
+        factory::{TorrentFactory, state::Empty},
+    },
+};
 
 /// An internal extension trait for `BTreeMap` to simplify extracting optional
 /// and required fields from Bencoded dictionaries.
@@ -75,6 +81,16 @@ pub struct Torrent<'a> {
 }
 
 impl Torrent<'_> {
+    #[must_use]
+    pub fn builder(info: InfoBuf) -> TorrentBuilder {
+        TorrentBuilder::new(info)
+    }
+
+    #[must_use] 
+    pub fn factory() -> TorrentFactory<Empty> {
+        TorrentFactory::new()
+    }
+
     #[must_use]
     pub fn trackers(&self) -> Vec<Vec<&Url>> {
         match (&self.announce, &self.announce_list) {
