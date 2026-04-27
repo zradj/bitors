@@ -284,11 +284,10 @@ impl TorrentFactory<state::HasFiles> {
         let file_infos = self
             .files
             .iter()
-            .map(File::open)
             .zip(file_path_comps)
-            .map(|(file, comps)| -> Result<FileInfo, Error> {
+            .map(|(path, comps)| -> Result<FileInfo, Error> {
                 Ok(FileInfo {
-                    length: file?.metadata()?.len(),
+                    length: std::fs::metadata(path)?.len(),
                     md5sum: None,
                     path: comps.into_iter().map(Cow::Owned).collect(),
                 })
