@@ -201,9 +201,9 @@ impl TorrentFactory<state::HasFiles> {
 
         let files = WalkDir::new(&path)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
-            .map(|e| e.into_path())
+            .map(walkdir::DirEntry::into_path)
             .collect::<Vec<_>>();
 
         if files.is_empty() {
@@ -262,27 +262,21 @@ impl TorrentFactory<state::HasFiles> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let files = self
+        let file_infos = self
             .files
             .iter()
             .map(File::open)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let file_infos = files
-            .iter()
             .zip(file_path_comps)
             .map(|(file, comps)| -> Result<FileInfo, Error> {
                 Ok(FileInfo {
-                    length: file.metadata()?.len(),
-                    // TODO: add functionality to compute this
+                    length: file?.metadata()?.len(),
                     md5sum: None,
                     path: comps,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // TODO: replace `as` with something better (maybe change the data type in the struct?)
-        let pieces = Self::compute_piece_hashes(files, piece_length_usize(piece_length)?)?;
+        let pieces = Self::compute_piece_hashes(self.files, piece_length_usize(piece_length)?)?;
 
         let name = match self.name {
             Some(name) => name,
@@ -328,32 +322,38 @@ impl TorrentFactory<state::HasFiles> {
         })
     }
 
-    fn compute_piece_hashes<I: IntoIterator<Item = impl Read>>(
-        files: I,
+    fn compute_piece_hashes<I: IntoIterator<Item = PathBuf>>(
+        paths: I,
         piece_length: usize,
     ) -> Result<Vec<[u8; 20]>, Error> {
-        let mut reader: Box<dyn Read> = Box::new(io::empty());
-        for file in files {
-            reader = Box::new(reader.chain(BufReader::new(file)));
-        }
-
         let mut hashes = vec![];
         let mut chunk = vec![0u8; piece_length];
+        let mut iter = paths.into_iter().map(File::open);
+        let mut reader = iter.next().unwrap()?;
 
-        loop {
+        'outer: loop {
             let mut total = 0;
+
             loop {
                 match reader.read(&mut chunk[total..])? {
-                    0 => break,
+                    0 => {
+                        if let Some(r) = iter.next() {
+                            reader = r?;
+                            continue;
+                        }
+
+                        if total > 0 {
+                            hashes.push(Sha1::digest(&chunk[..total]).into());
+                        }
+
+                        break 'outer;
+                    }
                     n => total += n,
                 }
+
                 if total == piece_length {
                     break;
                 }
-            }
-
-            if total == 0 {
-                break;
             }
 
             hashes.push(Sha1::digest(&chunk[..total]).into());
