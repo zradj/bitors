@@ -239,6 +239,7 @@ impl TorrentFactory<state::HasFiles> {
         let piece_length = self
             .piece_length
             .unwrap_or(NonZeroU64::new(512 * 1024).unwrap());
+
         let creation_date = self.creation_date.unwrap_or(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -329,31 +330,29 @@ impl TorrentFactory<state::HasFiles> {
         let mut hashes = vec![];
         let mut chunk = vec![0u8; piece_length];
         let mut iter = paths.into_iter().map(File::open);
-        let mut reader = iter.next().unwrap()?;
+        let mut file = iter
+            .next()
+            .expect("TorrentFactory<HasFiles> guarantees at least one file")?;
 
-        'outer: loop {
+        loop {
             let mut total = 0;
 
-            loop {
-                match reader.read(&mut chunk[total..])? {
+            while total < piece_length {
+                match file.read(&mut chunk[total..])? {
                     0 => {
-                        if let Some(r) = iter.next() {
-                            reader = r?;
+                        if let Some(f) = iter.next() {
+                            file = f?;
                             continue;
                         }
 
-                        if total > 0 {
-                            hashes.push(Sha1::digest(&chunk[..total]).into());
-                        }
-
-                        break 'outer;
+                        break;
                     }
                     n => total += n,
                 }
+            }
 
-                if total == piece_length {
-                    break;
-                }
+            if total == 0 {
+                break;
             }
 
             hashes.push(Sha1::digest(&chunk[..total]).into());
