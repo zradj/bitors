@@ -269,15 +269,13 @@ impl TorrentFactory<state::HasFiles> {
 
         let file_path_comps = Self::remove_common_prefix(&self.files)
             .iter()
-            .map(|p| -> Result<Vec<Cow<'_, str>>, Error> {
+            .map(|p| -> Result<Vec<String>, Error> {
                 p.components()
                     .map(|c| {
-                        Ok(Cow::Owned(
-                            c.as_os_str()
-                                .to_str()
-                                .ok_or(Error::NonUtf8Name)?
-                                .to_string(),
-                        ))
+                        Ok(c.as_os_str()
+                            .to_str()
+                            .ok_or(Error::NonUtf8Name)?
+                            .to_string())
                     })
                     .collect()
             })
@@ -292,7 +290,7 @@ impl TorrentFactory<state::HasFiles> {
                 Ok(FileInfo {
                     length: file?.metadata()?.len(),
                     md5sum: None,
-                    path: comps,
+                    path: comps.into_iter().map(Cow::Owned).collect(),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -332,15 +330,16 @@ impl TorrentFactory<state::HasFiles> {
             .first()
             .and_then(|tier| tier.first().cloned());
 
-        let announce_list = match self.announce_list.first() {
-            Some(tier) => {
-                if tier.is_empty() {
-                    None
-                } else {
-                    Some(self.announce_list)
-                }
-            }
-            None => None,
+        let announce_list = self
+            .announce_list
+            .into_iter()
+            .filter(|tier| !tier.is_empty())
+            .collect::<Vec<_>>();
+
+        let announce_list = if announce_list.is_empty() {
+            None
+        } else {
+            Some(announce_list)
         };
 
         Ok(Torrent {
