@@ -332,10 +332,21 @@ impl TorrentFactory<state::HasFiles> {
             .first()
             .and_then(|tier| tier.first().cloned());
 
+        let announce_list = match self.announce_list.first() {
+            Some(tier) => {
+                if tier.is_empty() {
+                    None
+                } else {
+                    Some(self.announce_list)
+                }
+            }
+            None => None,
+        };
+
         Ok(Torrent {
             info,
             announce,
-            announce_list: Some(self.announce_list),
+            announce_list,
             creation_date: Some(creation_date),
             comment: self.comment.map(Cow::Owned),
             created_by: self.created_by.map(Cow::Owned),
@@ -384,6 +395,8 @@ impl TorrentFactory<state::HasFiles> {
     }
 
     fn remove_common_prefix(paths: &[PathBuf]) -> Vec<PathBuf> {
+        debug_assert!(!paths.is_empty());
+
         let mut prefix = paths[0].clone();
 
         for s in &paths[1..] {
