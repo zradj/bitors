@@ -255,7 +255,7 @@ impl TorrentFactory<state::HasFiles> {
         Ok(self)
     }
 
-    pub fn create(self) -> Result<TorrentBuf, Error> {
+    pub fn build(self) -> Result<TorrentBuf, Error> {
         let piece_length = self
             .piece_length
             .unwrap_or(NonZeroU64::new(512 * 1024).unwrap());
