@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs::File,
-    io::{self, BufReader, Read},
+    io::{BufReader, Read},
     marker::PhantomData,
     num::NonZeroU64,
     path::PathBuf,
@@ -133,14 +133,14 @@ impl TorrentFactory<state::Empty> {
         self,
         file: impl Into<PathBuf>,
     ) -> Result<TorrentFactory<state::HasFiles>, Error> {
-        let path = file.into();
+        let file = file.into();
 
-        if !path.is_file() {
-            return Err(Error::NotAFile(path));
+        if !file.is_file() {
+            return Err(Error::NotAFile(file));
         }
 
         Ok(TorrentFactory {
-            files: vec![path],
+            files: vec![file],
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
@@ -156,14 +156,18 @@ impl TorrentFactory<state::Empty> {
         self,
         files: I,
     ) -> Result<TorrentFactory<state::HasFiles>, Error> {
-        let mut iter = files.into_iter().peekable();
+        let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
 
-        if iter.peek().is_none() {
+        if files.is_empty() {
             return Err(Error::NoFiles);
         }
 
+        if let Some(p) = files.iter().find(|p| !p.is_file()) {
+            return Err(Error::NotAFile(p.clone()));
+        }
+
         Ok(TorrentFactory {
-            files: iter.map(Into::into).collect(),
+            files,
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
@@ -186,25 +190,26 @@ impl TorrentFactory<state::HasFiles> {
     }
 
     pub fn from_directory(dir: impl Into<PathBuf>) -> Result<Self, Error> {
-        let path = dir.into();
+        let dir = dir.into();
 
-        if !path.is_dir() {
-            return Err(Error::NotADir(path));
+        if !dir.is_dir() {
+            return Err(Error::NotADir(dir));
         }
 
-        let name = path
+        let name = dir
             .file_name()
             .ok_or(Error::InvalidPath)?
             .to_str()
             .ok_or(Error::NonUtf8Name)?
             .to_owned();
 
-        let files = WalkDir::new(&path)
+        let mut files = WalkDir::new(&dir)
             .into_iter()
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
             .map(walkdir::DirEntry::into_path)
             .collect::<Vec<_>>();
+        files.sort();
 
         if files.is_empty() {
             Err(Error::EmptyDir)
@@ -224,15 +229,30 @@ impl TorrentFactory<state::HasFiles> {
     }
 
     #[must_use]
-    pub fn add_file(mut self, file: impl Into<PathBuf>) -> Self {
-        self.files.push(file.into());
-        self
+    pub fn add_file(mut self, file: impl Into<PathBuf>) -> Result<Self, Error> {
+        let file = file.into();
+
+        if !file.is_file() {
+            return Err(Error::NotAFile(file));
+        }
+
+        self.files.push(file);
+        Ok(self)
     }
 
     #[must_use]
-    pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(mut self, files: I) -> Self {
-        self.files.extend(files.into_iter().map(Into::into));
-        self
+    pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(
+        mut self,
+        files: I,
+    ) -> Result<Self, Error> {
+        let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
+
+        if let Some(p) = files.iter().find(|p| !p.is_file()) {
+            return Err(Error::NotAFile(p.clone()));
+        }
+
+        self.files.extend(files);
+        Ok(self)
     }
 
     pub fn create(self) -> Result<TorrentBuf, Error> {
@@ -329,8 +349,10 @@ impl TorrentFactory<state::HasFiles> {
     ) -> Result<Vec<[u8; 20]>, Error> {
         let mut hashes = vec![];
         let mut chunk = vec![0u8; piece_length];
-        let mut iter = paths.into_iter().map(File::open);
-        let mut file = iter
+        let mut iter = paths
+            .into_iter()
+            .map(|p| File::open(p).map(|f| BufReader::with_capacity(piece_length, f)));
+        let mut reader = iter
             .next()
             .expect("TorrentFactory<HasFiles> guarantees at least one file")?;
 
@@ -338,10 +360,10 @@ impl TorrentFactory<state::HasFiles> {
             let mut total = 0;
 
             while total < piece_length {
-                match file.read(&mut chunk[total..])? {
+                match reader.read(&mut chunk[total..])? {
                     0 => {
-                        if let Some(f) = iter.next() {
-                            file = f?;
+                        if let Some(r) = iter.next() {
+                            reader = r?;
                             continue;
                         }
 
