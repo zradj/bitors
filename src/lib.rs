@@ -1,4 +1,4 @@
-//! A library for parsing and creating BitTorrent metainfo files (`.torrent`).
+//! A crate for parsing and creating BitTorrent metainfo files (`.torrent`).
 //!
 //! `bitors` provides two main capabilities:
 //!
