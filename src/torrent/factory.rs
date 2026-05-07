@@ -23,24 +23,36 @@
 //! ```no_run
 //! use std::num::NonZeroU64;
 //! use url::Url;
-//! use crate::factory::TorrentFactory;
+//! use bitors::torrent::factory::{TorrentFactory, Error};
 //!
-//! let torrent = TorrentFactory::new()
-//!     .name("my-release")
-//!     .piece_length(NonZeroU64::new(512 * 1024).unwrap())
-//!     .add_announce(Url::parse("udp://tracker.example.com:6969/announce").unwrap())
-//!     .add_file("path/to/file.iso")?
-//!     .build()?;
+//! fn main() -> Result<(), Error> {
+//!     let torrent = TorrentFactory::new()
+//!         .name("my-release")
+//!         .piece_length(NonZeroU64::new(512 * 1024).unwrap())
+//!         .add_announce(Url::parse("udp://tracker.example.com:6969/announce").unwrap())
+//!         .add_file("path/to/file.iso")?
+//!         .build()?;
+//!
+//!     // Do other stuff
+//!
+//!     Ok(())
+//! }
 //! ```
 //!
 //! ## Directory torrent
 //!
 //! ```no_run
-//! use crate::factory::TorrentFactory;
+//! use bitors::torrent::factory::{TorrentFactory, Error};
 //!
-//! let torrent = TorrentFactory::from_directory("path/to/my-album/")?
-//!     .private()
-//!     .build()?;
+//! fn main() -> Result<(), Error> {
+//!     let torrent = TorrentFactory::from_directory("path/to/my-album/")?
+//!         .private()
+//!         .build()?;
+//!
+//!     // Do other stuff
+//!
+//!     Ok(())
+//! }
 //! ```
 
 use std::{
@@ -226,7 +238,7 @@ impl<T> TorrentFactory<T> {
     /// # Example
     ///
     /// ```no_run
-    /// # use url::Url; use crate::factory::TorrentFactory;
+    /// # use url::Url; use bitors::torrent::factory::TorrentFactory;
     /// let factory = TorrentFactory::new()
     ///     // Tier 0 — primary trackers
     ///     .add_announce(Url::parse("udp://primary.example.com:6969/announce").unwrap())
@@ -428,7 +440,6 @@ impl TorrentFactory<state::HasFiles> {
     /// # Errors
     ///
     /// Returns [`Error::NotAFile`] if `file` does not exist or is not a regular file.
-    #[must_use]
     pub fn add_file(mut self, file: impl Into<PathBuf>) -> Result<Self, Error> {
         let file = file.into();
 
@@ -446,7 +457,6 @@ impl TorrentFactory<state::HasFiles> {
     ///
     /// Returns [`Error::NotAFile`] if any path in `files` is not a regular file.
     /// An empty iterator is accepted without error (the existing file list is unchanged).
-    #[must_use]
     pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(
         mut self,
         files: I,
@@ -488,9 +498,10 @@ impl TorrentFactory<state::HasFiles> {
     /// - [`Error::PieceLengthTooLarge`] — the piece length overflows `usize` (only possible
     ///   on 32-bit targets).
     pub fn build(self) -> Result<TorrentBuf, Error> {
-        let piece_length = self
-            .piece_length
-            .unwrap_or(NonZeroU64::new(512 * 1024).unwrap());
+        let piece_length = self.piece_length.unwrap_or(
+            #[expect(clippy::missing_panics_doc, reason = "infallible")]
+            NonZeroU64::new(512 * 1024).unwrap(),
+        );
 
         let creation_date = self.creation_date.unwrap_or(
             SystemTime::now()
@@ -530,6 +541,7 @@ impl TorrentFactory<state::HasFiles> {
 
         let name = match self.name {
             Some(name) => name,
+            #[expect(clippy::missing_panics_doc, reason = "infallible")]
             None => file_infos[0]
                 .full_path()
                 .file_name()

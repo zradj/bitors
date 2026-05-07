@@ -1,1 +1,1 @@
-doc-valid-idents = ["BitTorrent"]
+doc-valid-idents = ["BitTorrent", "KiB", "MiB"]

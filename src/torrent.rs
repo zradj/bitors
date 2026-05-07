@@ -81,16 +81,36 @@ pub struct Torrent<'a> {
 }
 
 impl Torrent<'_> {
+    /// Creates a new [`TorrentBuilder`] pre-loaded with the given `info` dictionary.
+    ///
+    /// Use the builder to attach optional metadata (announce URLs, creation date,
+    /// comments, etc.) before constructing a final [`TorrentBuf`].
     #[must_use]
     pub fn builder(info: InfoBuf) -> TorrentBuilder {
         TorrentBuilder::new(info)
     }
 
-    #[must_use] 
+    /// Creates a new [`TorrentFactory`] in its initial [`Empty`] state.
+    ///
+    /// The factory uses a typestate pattern to guide construction of a torrent,
+    /// enforcing at compile-time that all required fields are provided before
+    /// the final value is assembled.
+    #[must_use]
     pub fn factory() -> TorrentFactory<Empty> {
         TorrentFactory::new()
     }
 
+    /// Returns all tracker URLs as a tiered list, normalised to the
+    /// `announce-list` format defined in [BEP 12].
+    ///
+    /// - If only `announce` is present, it is wrapped in a single-tier list:
+    ///   `[[announce]]`.
+    /// - If `announce-list` is present it is returned as-is (the standalone
+    ///   `announce` field is ignored per BEP 12).
+    /// - If neither field is set (only valid for private torrents), an empty
+    ///   `Vec` is returned.
+    ///
+    /// [BEP 12]: https://www.bittorrent.org/beps/bep_0012.html
     #[must_use]
     pub fn trackers(&self) -> Vec<Vec<&Url>> {
         match (&self.announce, &self.announce_list) {
@@ -106,6 +126,11 @@ impl Torrent<'_> {
         self.into()
     }
 
+    /// Converts this `Torrent<'a>` into a [`TorrentBuf`] (`Torrent<'static>`) by
+    /// cloning any borrowed data into owned allocations.
+    ///
+    /// This is useful when you need to store or return a torrent without being
+    /// constrained by the lifetime of the original source bytes.
     #[must_use]
     pub fn into_owned(self) -> TorrentBuf {
         TorrentBuf {
@@ -185,6 +210,10 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     }
 }
 
+/// An owned, lifetime-free version of [`Torrent`].
+///
+/// All borrowed string slices and byte slices are replaced with heap-allocated
+/// equivalents, making this value self-contained and `'static`.
 pub type TorrentBuf = Torrent<'static>;
 
 /// Represents the `info` dictionary within a torrent file.
@@ -214,6 +243,8 @@ impl Info<'_> {
         self.into()
     }
 
+    /// Converts this `Info<'a>` into an [`InfoBuf`] (`Info<'static>`) by cloning
+    /// any borrowed data into owned allocations.
     #[must_use]
     pub fn into_owned(self) -> InfoBuf {
         InfoBuf {
@@ -292,6 +323,9 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
     }
 }
 
+/// An owned, lifetime-free version of [`Info`].
+///
+/// See [`TorrentBuf`] for the same concept applied to the top-level torrent.
 pub type InfoBuf = Info<'static>;
 
 /// Defines the structure of the payload contained within the torrent.
@@ -314,16 +348,21 @@ pub enum FileMode<'a> {
 }
 
 impl FileMode<'_> {
+    /// Returns `true` if this torrent carries exactly one file.
     #[must_use]
     pub fn is_single(&self) -> bool {
         matches!(self, Self::Single { .. })
     }
 
+    /// Returns `true` if this torrent carries multiple files inside a directory.
     #[must_use]
     pub fn is_multi(&self) -> bool {
         !self.is_single()
     }
 
+    /// Converts this `FileMode<'a>` into a [`FileModeBuf`] (`FileMode<'static>`)
+    /// by cloning any borrowed string data into owned allocations.
+    #[must_use]
     pub fn into_owned(self) -> FileModeBuf {
         match self {
             Self::Single { length, md5sum } => FileModeBuf::Single {
@@ -337,6 +376,7 @@ impl FileMode<'_> {
     }
 }
 
+/// An owned, lifetime-free version of [`FileMode`].
 pub type FileModeBuf = FileMode<'static>;
 
 /// Metadata for a single file within a multi-file torrent.
@@ -352,6 +392,11 @@ pub struct FileInfo<'a> {
 }
 
 impl FileInfo<'_> {
+    /// Reconstructs the file's full relative path as a [`PathBuf`].
+    ///
+    /// Each element of [`FileInfo::path`] becomes one path component, so
+    /// `["docs", "readme.txt"]` yields `docs/readme.txt` (or the OS-appropriate
+    /// separator).
     #[must_use]
     pub fn full_path(&self) -> PathBuf {
         let mut full_path = PathBuf::new();
@@ -360,12 +405,15 @@ impl FileInfo<'_> {
             .for_each(|comp| full_path.push(comp.to_string()));
         full_path
     }
+
     /// Converts the `FileInfo` struct back into a `Bencode` representation.
     #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
     }
 
+    /// Converts this `FileInfo<'a>` into a [`FileInfoBuf`] (`FileInfo<'static>`)
+    /// by cloning all borrowed string data into owned allocations.
     #[must_use]
     pub fn into_owned(self) -> FileInfoBuf {
         FileInfoBuf {
@@ -414,6 +462,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
     }
 }
 
+/// An owned, lifetime-free version of [`FileInfo`].
 pub type FileInfoBuf = FileInfo<'static>;
 
 /// Errors that can occur during the parsing and validation of a `.torrent` file.

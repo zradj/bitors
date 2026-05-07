@@ -291,7 +291,7 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
         }
 
         if let Some(creation_date) = torrent.creation_date {
-            map.insert(b"creation date", Self::Int(creation_date as i64));
+            map.insert(b"creation date", Self::Int(creation_date.try_into().unwrap_or(0)));
         }
 
         if let Some(comment) = &torrent.comment {
