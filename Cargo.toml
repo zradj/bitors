@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A crate for parsing and creating BitTorrent metainfo files (`.torrent`)"
+repository = "https://github.com/zradj/bitors"
 
 [dependencies]
 sha1 = "0.11.0"
