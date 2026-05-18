@@ -1,4 +1,5 @@
 # bitors
+[![crates.io](https://img.shields.io/crates/v/bitors.svg)](https://crates.io/crates/bitors)
 
 A Rust library for parsing and creating BitTorrent metainfo files (`.torrent`).
 
