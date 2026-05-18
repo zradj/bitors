@@ -138,6 +138,14 @@
 //! # Feature flags
 //!
 //! This crate has no optional feature flags. All functionality is always available.
+//!
+//! # AI usage disclosure
+//!
+//! The source code in this crate was written manually, with recommendations
+//! from large language models (LLMs) consulted during development.  All
+//! documentation — including this crate-level doc, module docs, and item-level
+//! doc comments — was written in full by LLMs and subsequently reviewed
+//! manually for accuracy.
 
 #![warn(clippy::pedantic)]
 

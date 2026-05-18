@@ -1,3 +1,53 @@
+//! Zero-copy Bencode parser and encoder.
+//!
+//! [Bencode] is the binary encoding used throughout the BitTorrent protocol.
+//! It supports four value types — integers, byte strings, lists, and
+//! dictionaries — all represented by the [`Bencode`] enum.
+//!
+//! [Bencode]: https://www.bittorrent.org/beps/bep_0003.html#bencoding
+//!
+//! # Parsing
+//!
+//! Feed a byte slice into [`Parser`] to obtain a [`Bencode`] tree.  All
+//! [`Bytes`](Bencode::Bytes) payloads and [`Dict`](Bencode::Dict) keys borrow
+//! directly from the source slice — no heap allocation occurs for them during
+//! parsing.
+//!
+//! ```
+//! use bitors::bencode::Parser;
+//!
+//! let mut parser = Parser::new(b"d3:fooi42ee");
+//! let value = parser.parse().unwrap();
+//! let dict  = value.as_dict().unwrap();
+//! assert_eq!(dict[b"foo".as_ref()].as_int().unwrap(), 42);
+//! ```
+//!
+//! # Encoding
+//!
+//! Three encoding paths are available, each a thin wrapper over
+//! [`encode_to_writer`](Bencode::encode_to_writer):
+//!
+//! | Method | Use when… |
+//! |---|---|
+//! | [`encode`](Bencode::encode) | You want a fresh `Vec<u8>` |
+//! | [`encode_extend`](Bencode::encode_extend) | You are appending into an existing buffer |
+//! | [`encode_to_writer`](Bencode::encode_to_writer) | You are writing to a file or socket |
+//!
+//! ```
+//! use bitors::bencode::Bencode;
+//!
+//! let value = Bencode::Int(42);
+//! assert_eq!(value.encode(), b"i42e");
+//! ```
+//!
+//! # Torrent conversion
+//!
+//! The module also contains `From` implementations that convert
+//! [`Torrent`](crate::torrent::Torrent), [`Info`](crate::torrent::Info), and
+//! [`FileInfo`](crate::torrent::FileInfo) references into their `Bencode`
+//! equivalents.  All conversions borrow data from the source value, so no
+//! string or byte data is copied.
+
 use std::{
     collections::BTreeMap,
     io::{self, Write},
@@ -442,33 +492,6 @@ impl<'a> Parser<'a> {
     /// or exceeds the configured depth limit.
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
         self.parse_internal(0)
-    }
-
-    /// Returns a raw slice of the input data from `start` up to (but not
-    /// including) the current cursor position.
-    ///
-    /// Intended for callers that need access to the exact bytes consumed by a
-    /// preceding [`parse`](Self::parse) call — for example, to hash the
-    /// `info` dictionary of a torrent file without re-encoding it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `start` is greater than the current cursor position, or if
-    /// either index is out of bounds for the source buffer.
-    #[must_use]
-    pub fn raw_span(&self, start: usize) -> &'a [u8] {
-        &self.data[start..self.cursor]
-    }
-
-    /// Returns the current byte offset of the parser's cursor within the
-    /// source buffer.
-    ///
-    /// Useful in combination with [`raw_span`](Self::raw_span) to capture
-    /// the start position before a `parse` call and then retrieve the exact
-    /// bytes it consumed.
-    #[must_use]
-    pub fn position(&self) -> usize {
-        self.cursor
     }
 
     /// Peeks at the next byte without advancing the cursor.

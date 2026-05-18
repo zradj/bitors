@@ -1,3 +1,53 @@
+//! Types and logic for `.torrent` metainfo files.
+//!
+//! This module contains the complete type hierarchy that mirrors the structure
+//! of a BitTorrent metainfo file, along with parsing (via [`TryFrom<&Bencode>`])
+//! and two construction paths:
+//!
+//! - [`builder::TorrentBuilder`] — wraps an [`InfoBuf`] you already have.
+//! - [`factory::TorrentFactory`] — reads files from disk and computes piece hashes.
+//!
+//! # Type hierarchy
+//!
+//! ```text
+//! Torrent<'a>
+//! ├── announce: Option<Url>
+//! ├── announce_list: Option<Vec<Vec<Url>>>
+//! ├── creation_date: Option<u64>
+//! ├── comment / created_by / encoding: Option<Cow<'a, str>>
+//! └── info: Info<'a>
+//!     ├── name: Cow<'a, str>
+//!     ├── piece_length: NonZeroU64
+//!     ├── pieces: Cow<'a, [[u8; 20]]>   ← one 20-byte SHA-1 hash per piece
+//!     ├── private: bool
+//!     └── file_mode: FileMode<'a>
+//!         ├── Single { length, md5sum }
+//!         └── Multi  { files: Vec<FileInfo<'a>> }
+//!                         ├── length
+//!                         ├── md5sum
+//!                         └── path: Vec<Cow<'a, str>>
+//! ```
+//!
+//! # Lifetimes and owned variants
+//!
+//! Every type carries a lifetime parameter `'a` because string and byte-slice
+//! fields may borrow from the original source buffer when the value is produced
+//! by the Bencode parser.  Call `into_owned()` on any value to obtain its
+//! `'static` alias:
+//!
+//! | Borrowing type | `'static` alias |
+//! |---|---|
+//! | `Torrent<'a>` | [`TorrentBuf`] |
+//! | `Info<'a>` | [`InfoBuf`] |
+//! | `FileMode<'a>` | [`FileModeBuf`] |
+//! | `FileInfo<'a>` | [`FileInfoBuf`] |
+//!
+//! # Round-trip encoding
+//!
+//! Any value can be converted back to a [`Bencode`] tree via the `From`
+//! implementations in [`crate::bencode`], and then written to a file with
+//! [`Bencode::encode_to_writer`](crate::bencode::Bencode::encode_to_writer).
+
 pub mod builder;
 pub mod factory;
 
