@@ -373,6 +373,10 @@ impl<'a> From<&'a Info<'a>> for Bencode<'a> {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
         map.insert(b"name", Self::Bytes(info.name.as_bytes()));
+        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // approaches that size.
+        #[allow(clippy::cast_possible_wrap)]
         map.insert(b"piece length", Self::Int(info.piece_length.get() as i64));
         map.insert(b"pieces", Self::Bytes(info.pieces.as_flattened()));
 
@@ -382,6 +386,10 @@ impl<'a> From<&'a Info<'a>> for Bencode<'a> {
 
         match &info.file_mode {
             FileMode::Single { length, md5sum } => {
+                // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+                // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+                // approaches that size.
+                #[allow(clippy::cast_possible_wrap)]
                 map.insert(b"length", Self::Int(*length as i64));
 
                 if let Some(md5sum) = md5sum {
@@ -408,6 +416,10 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
     fn from(file_info: &'a FileInfo<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
+        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // approaches that size.
+        #[allow(clippy::cast_possible_wrap)]
         map.insert(b"length", Self::Int(file_info.length as i64));
 
         let path: Vec<Self> = file_info
