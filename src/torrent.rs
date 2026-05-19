@@ -205,7 +205,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     /// Returns an `Error` if:
     /// - The bencode is not a dictionary.
     /// - The required `info` field is missing or invalid.
-    /// - Announce URLs are missing or malformed.
+    /// - Announce URLs are malformed.
     /// - Data types for specific fields do not match the specification.
     fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
         let map = bencode.as_dict()?;
