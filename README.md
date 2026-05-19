@@ -21,7 +21,7 @@ Add `bitors` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bitors = "1.0.0"
+bitors = "1.1.2"
 ```
 
 ---
