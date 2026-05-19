@@ -229,10 +229,6 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
             })
             .transpose()?;
 
-        if !info.private && announce.is_none() && announce_list.is_none() {
-            return Err(Error::MissingAnnounce);
-        }
-
         let creation_date = map
             .opt(b"creation date")
             .map(|b| -> Result<u64, Error> {
