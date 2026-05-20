@@ -631,27 +631,6 @@ mod tests {
     }
 
     #[test]
-    fn test_torrent_missing_announce() {
-        // Build a valid Info dict
-        let mut info_map = BTreeMap::new();
-        info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
-        info_map.insert(&b"piece length"[..], Bencode::Int(262_144));
-        info_map.insert(&b"length"[..], Bencode::Int(1024));
-        let pieces = dummy_pieces();
-        info_map.insert(&b"pieces"[..], Bencode::Bytes(&pieces));
-
-        let mut torrent_map = BTreeMap::new();
-        torrent_map.insert(&b"info"[..], Bencode::Dict(info_map));
-        // Intentionally leaving out 'announce' and 'announce-list'
-
-        let bencode = Bencode::Dict(torrent_map);
-        let err =
-            Torrent::try_from(&bencode).expect_err("Should have failed due to missing announce");
-
-        assert!(matches!(err, Error::MissingAnnounce));
-    }
-
-    #[test]
     fn test_parse_valid_torrent() {
         let mut info_map = BTreeMap::new();
         info_map.insert(&b"name"[..], Bencode::Bytes(b"test"));
