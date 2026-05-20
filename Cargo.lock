@@ -6,6 +6,7 @@ version = 4
 name = "bitors"
 version = "1.1.2"
 dependencies = [
+ "digest-io",
  "sha1",
  "thiserror",
  "url",
@@ -60,6 +61,15 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
+]
+
+[[package]]
+name = "digest-io"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2de63d600bc7fab91180bc17385f29b342468dc8ef2af09dceba450a293de3da"
+dependencies = [
+ "digest",
 ]
 
 [[package]]

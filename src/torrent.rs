@@ -53,6 +53,7 @@ pub mod factory;
 
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU64, path::PathBuf};
 
+use sha1::{Digest, Sha1};
 use thiserror::Error;
 use url::Url;
 
@@ -170,6 +171,11 @@ impl Torrent<'_> {
         }
     }
 
+    #[must_use]
+    pub fn info_hash(&self) -> [u8; 20] {
+        self.info.info_hash()
+    }
+
     /// Converts the `Torrent` struct back into a `Bencode` representation.
     #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
@@ -283,6 +289,16 @@ pub struct Info<'a> {
 }
 
 impl Info<'_> {
+    #[must_use]
+    pub fn info_hash(&self) -> [u8; 20] {
+        let mut hasher = digest_io::IoWrapper(Sha1::new());
+        #[expect(clippy::missing_panics_doc, reason = "infallible")]
+        self.to_bencode()
+            .encode_to_writer(&mut hasher)
+            .expect("Writing to hasher should not fail");
+        hasher.0.finalize().into()
+    }
+
     /// Converts the `Info` struct back into a `Bencode` representation.
     #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {

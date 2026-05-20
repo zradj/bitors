@@ -9,6 +9,7 @@ categories = ["encoding", "parser-implementations", "filesystem"]
 keywords = ["bittorrent", "torrent", "bencode", "metainfo", "p2p"]
 
 [dependencies]
+digest-io = "0.1.0"
 sha1 = "0.11.0"
 thiserror = "2.0.18"
 url = "2.5.8"
