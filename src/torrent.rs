@@ -112,7 +112,7 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
 ///
 /// This struct contains all the top-level metadata required by a BitTorrent client
 /// to connect to trackers and understand the contents of the torrent.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Torrent<'a> {
     /// A dictionary that describes the file(s) of the torrent.
     pub info: Info<'a>,
@@ -272,7 +272,7 @@ pub type TorrentBuf = Torrent<'static>;
 ///
 /// This structure holds the critical data describing the payload (the files to download),
 /// including file names, piece sizes, and the cryptographic hashes used to verify data integrity.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Info<'a> {
     /// In the single file case, the name of the file.
     /// In the multiple file case, the name of the directory in which to store all the files.
@@ -393,7 +393,7 @@ pub type InfoBuf = Info<'static>;
 /// Defines the structure of the payload contained within the torrent.
 ///
 /// BitTorrent supports both single-file payloads and multi-file directory payloads.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum FileMode<'a> {
     /// Represents a torrent containing exactly one file.
     Single {
@@ -442,7 +442,7 @@ impl FileMode<'_> {
 pub type FileModeBuf = FileMode<'static>;
 
 /// Metadata for a single file within a multi-file torrent.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FileInfo<'a> {
     /// The length of the file in bytes.
     pub length: u64,

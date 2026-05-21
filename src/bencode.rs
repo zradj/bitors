@@ -84,7 +84,7 @@ use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
 /// let value = Bencode::Int(42);
 /// assert_eq!(value.encode(), b"i42e");
 /// ```
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Bencode<'a> {
     /// A 64-bit signed integer.
     Int(i64),
@@ -341,7 +341,10 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
         }
 
         if let Some(creation_date) = torrent.creation_date {
-            map.insert(b"creation date", Self::Int(creation_date.try_into().unwrap_or(0)));
+            map.insert(
+                b"creation date",
+                Self::Int(creation_date.try_into().unwrap_or(0)),
+            );
         }
 
         if let Some(comment) = &torrent.comment {
