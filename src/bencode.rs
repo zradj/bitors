@@ -396,6 +396,10 @@ impl<'a> From<&'a Info<'a>> for Bencode<'a> {
             map.insert(b"private", Self::Int(1));
         }
 
+        if let Some(source) = &info.source {
+            map.insert(b"source", Self::Bytes(source.as_bytes()));
+        }
+
         match &info.file_mode {
             FileMode::Single { length, md5sum } => {
                 // Lengths are `u64`; Bencode integers are `i64`. A file larger than

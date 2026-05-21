@@ -128,6 +128,7 @@ pub struct TorrentFactory<State> {
     name: Option<String>,
     piece_length: Option<NonZeroU64>,
     private: bool,
+    source: Option<String>,
     announce_list: Vec<Vec<Url>>,
     url_list: Vec<Url>,
     creation_date: Option<u64>,
@@ -176,6 +177,12 @@ impl<T> TorrentFactory<T> {
     #[must_use]
     pub fn private(mut self) -> Self {
         self.private = true;
+        self
+    }
+
+    #[must_use]
+    pub fn source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
         self
     }
 
@@ -300,6 +307,7 @@ impl TorrentFactory<state::Empty> {
             name: None,
             piece_length: None,
             private: false,
+            source: None,
             announce_list: vec![],
             url_list: vec![],
             creation_date: None,
@@ -330,6 +338,7 @@ impl TorrentFactory<state::Empty> {
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
+            source: self.source,
             announce_list: self.announce_list,
             url_list: self.url_list,
             creation_date: self.creation_date,
@@ -364,6 +373,7 @@ impl TorrentFactory<state::Empty> {
             name: self.name,
             piece_length: self.piece_length,
             private: self.private,
+            source: self.source,
             announce_list: self.announce_list,
             url_list: self.url_list,
             creation_date: self.creation_date,
@@ -442,6 +452,7 @@ impl TorrentFactory<state::HasFiles> {
                 name: Some(name),
                 piece_length: None,
                 private: false,
+                source: None,
                 announce_list: vec![],
                 url_list: vec![],
                 creation_date: None,
@@ -582,6 +593,7 @@ impl TorrentFactory<state::HasFiles> {
             piece_length,
             pieces: Cow::Owned(pieces),
             private: self.private,
+            source: self.source.map(Cow::Owned),
             file_mode,
         };
 

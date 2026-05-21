@@ -93,7 +93,7 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
         self.opt(key)
             .map(Bencode::as_str)
             .transpose()
-            .map_err(Into::into)
+            .map_err(Error::from)
     }
 
     fn require(&self, key: &[u8]) -> Result<&Bencode<'a>, Error> {
@@ -298,6 +298,7 @@ pub struct Info<'a> {
     /// If true, the client must not obtain peer data from the DHT or PEX.
     /// It must only rely on the specified tracker(s).
     pub private: bool,
+    pub source: Option<Cow<'a, str>>,
     /// Dictates whether this torrent represents a single file or a directory of multiple files.
     pub file_mode: FileMode<'a>,
 }
@@ -328,6 +329,7 @@ impl Info<'_> {
             piece_length: self.piece_length,
             pieces: Cow::Owned(self.pieces.into_owned()),
             private: self.private,
+            source: self.source.map(|c| Cow::Owned(c.into_owned())),
             file_mode: self.file_mode.into_owned(),
         }
     }
@@ -369,6 +371,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
             None => false,
         };
 
+        let source = map.opt_str(b"source")?.map(Cow::Borrowed);
+
         let file_mode = if let Some(b) = map.opt(b"files") {
             let files = b
                 .as_list()?
@@ -394,6 +398,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
             piece_length,
             pieces: Cow::Borrowed(pieces),
             private,
+            source,
             file_mode,
         })
     }
