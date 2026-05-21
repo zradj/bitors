@@ -340,6 +340,15 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
             map.insert(b"announce-list", Self::List(announce_list));
         }
 
+        if let Some(url_list) = &torrent.url_list {
+            let url_list = url_list
+                .iter()
+                .map(|url| Self::Bytes(url.as_str().as_bytes()))
+                .collect();
+
+            map.insert(b"url-list", Self::List(url_list));
+        }
+
         if let Some(creation_date) = torrent.creation_date {
             map.insert(
                 b"creation date",

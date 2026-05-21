@@ -56,6 +56,7 @@ pub struct TorrentBuilder {
     info: InfoBuf,
     announce: Option<Url>,
     announce_list: Option<Vec<Vec<Url>>>,
+    url_list: Option<Vec<Url>>,
     creation_date: Option<u64>,
     comment: Option<String>,
     created_by: Option<String>,
@@ -73,6 +74,7 @@ impl TorrentBuilder {
             info,
             announce: None,
             announce_list: None,
+            url_list: None,
             creation_date: None,
             comment: None,
             created_by: None,
@@ -107,6 +109,12 @@ impl TorrentBuilder {
     #[must_use]
     pub fn announce_list(mut self, announce_list: Vec<Vec<Url>>) -> Self {
         self.announce_list = Some(announce_list);
+        self
+    }
+
+    #[must_use]
+    pub fn url_list(mut self, url_list: Vec<Url>) -> Self {
+        self.url_list = Some(url_list);
         self
     }
 
@@ -170,6 +178,7 @@ impl TorrentBuilder {
             info: self.info,
             announce: self.announce,
             announce_list: self.announce_list,
+            url_list: self.url_list,
             creation_date: self.creation_date,
             comment: self.comment.map(Cow::Owned),
             created_by: self.created_by.map(Cow::Owned),

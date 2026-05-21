@@ -13,6 +13,7 @@
 //! Torrent<'a>
 //! ├── announce: Option<Url>
 //! ├── announce_list: Option<Vec<Vec<Url>>>
+//! ├── url_list: Option<Vec<Url>>
 //! ├── creation_date: Option<u64>
 //! ├── comment / created_by / encoding: Option<Cow<'a, str>>
 //! └── info: Info<'a>
@@ -120,6 +121,7 @@ pub struct Torrent<'a> {
     pub announce: Option<Url>,
     /// An optional list of backup trackers (Tiered trackers).
     pub announce_list: Option<Vec<Vec<Url>>>,
+    pub url_list: Option<Vec<Url>>,
     /// The creation time of the torrent, in standard POSIX epoch format.
     pub creation_date: Option<u64>,
     /// Free-form textual comments of the author.
@@ -193,6 +195,7 @@ impl Torrent<'_> {
             info: self.info.into_owned(),
             announce: self.announce,
             announce_list: self.announce_list,
+            url_list: self.url_list,
             creation_date: self.creation_date,
             comment: self.comment.map(|c| Cow::Owned(c.into_owned())),
             created_by: self.created_by.map(|c| Cow::Owned(c.into_owned())),
@@ -235,6 +238,16 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
             })
             .transpose()?;
 
+        let url_list = map
+            .opt(b"url-list")
+            .map(|b| {
+                b.as_list()?
+                    .iter()
+                    .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
+                    .collect::<Result<Vec<Url>, _>>()
+            })
+            .transpose()?;
+
         let creation_date = map
             .opt(b"creation date")
             .map(|b| -> Result<u64, Error> {
@@ -254,6 +267,7 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
             info,
             announce,
             announce_list,
+            url_list,
             creation_date,
             comment,
             created_by,

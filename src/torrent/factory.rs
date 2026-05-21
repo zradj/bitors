@@ -129,6 +129,7 @@ pub struct TorrentFactory<State> {
     piece_length: Option<NonZeroU64>,
     private: bool,
     announce_list: Vec<Vec<Url>>,
+    url_list: Vec<Url>,
     creation_date: Option<u64>,
     created_by: Option<String>,
     comment: Option<String>,
@@ -256,6 +257,18 @@ impl<T> TorrentFactory<T> {
         self
     }
 
+    #[must_use]
+    pub fn add_url(mut self, url: Url) -> Self {
+        self.url_list.push(url);
+        self
+    }
+
+    #[must_use]
+    pub fn add_urls<I: IntoIterator<Item = Url>>(mut self, urls: I) -> Self {
+        self.url_list.extend(urls);
+        self
+    }
+
     /// Returns a mutable reference to the last announce tier, creating one if necessary.
     fn get_last_announce_tier(&mut self) -> &mut Vec<Url> {
         if self.announce_list.is_empty() {
@@ -288,6 +301,7 @@ impl TorrentFactory<state::Empty> {
             piece_length: None,
             private: false,
             announce_list: vec![],
+            url_list: vec![],
             creation_date: None,
             created_by: None,
             comment: None,
@@ -317,6 +331,7 @@ impl TorrentFactory<state::Empty> {
             piece_length: self.piece_length,
             private: self.private,
             announce_list: self.announce_list,
+            url_list: self.url_list,
             creation_date: self.creation_date,
             created_by: self.created_by,
             comment: self.comment,
@@ -350,6 +365,7 @@ impl TorrentFactory<state::Empty> {
             piece_length: self.piece_length,
             private: self.private,
             announce_list: self.announce_list,
+            url_list: self.url_list,
             creation_date: self.creation_date,
             created_by: self.created_by,
             comment: self.comment,
@@ -427,6 +443,7 @@ impl TorrentFactory<state::HasFiles> {
                 piece_length: None,
                 private: false,
                 announce_list: vec![],
+                url_list: vec![],
                 creation_date: None,
                 created_by: None,
                 comment: None,
@@ -585,10 +602,17 @@ impl TorrentFactory<state::HasFiles> {
             Some(announce_list)
         };
 
+        let url_list = if self.url_list.is_empty() {
+            None
+        } else {
+            Some(self.url_list)
+        };
+
         Ok(Torrent {
             info,
             announce,
             announce_list,
+            url_list,
             creation_date: Some(creation_date),
             comment: self.comment.map(Cow::Owned),
             created_by: self.created_by.map(Cow::Owned),
