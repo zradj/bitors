@@ -178,6 +178,22 @@ impl Torrent<'_> {
         self.info.info_hash()
     }
 
+    #[must_use]
+    pub fn total_size(&self) -> u64 {
+        match &self.info.file_mode {
+            FileMode::Single { length, .. } => *length,
+            FileMode::Multi { files } => files.iter().map(|f| f.length).sum(),
+        }
+    }
+
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        match &self.info.file_mode {
+            FileMode::Single { .. } => 1,
+            FileMode::Multi { files } => files.len(),
+        }
+    }
+
     /// Converts the `Torrent` struct back into a `Bencode` representation.
     #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
