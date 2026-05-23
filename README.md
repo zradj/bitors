@@ -28,7 +28,31 @@ bitors = "1.2.0"
 
 ## Quick start
 
-### Parsing a `.torrent` file
+### Parsing a `.torrent` file (shortcut)
+
+When you only need the raw Bencode tree as an intermediate step, `parse_torrent`
+collapses `Parser::new` + `.parse()` into a single call:
+
+```rust
+use bitors::{parse_torrent, torrent::Torrent};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("ubuntu.torrent")?;
+
+    let bencode = parse_torrent(&bytes)?;
+    let torrent: Torrent<'_> = (&bencode).try_into()?;
+
+    println!("Name: {}", torrent.info.name);
+    Ok(())
+}
+```
+
+For full control over the parser (e.g. to parse a sub-slice), construct
+[`Parser`](https://docs.rs/bitors/latest/bitors/bencode/struct.Parser.html) directly.
+
+---
+
+### Parsing a `.torrent` file (manual pipeline)
 
 ```rust
 use std::fs;
@@ -129,6 +153,7 @@ let torrent = Torrent::builder(make_info())
 | `bitors::torrent` | `Torrent`, `Info`, `FileMode`, `FileInfo`, owned type aliases |
 | `bitors::torrent::builder` | `TorrentBuilder` — wrap an existing `InfoBuf` |
 | `bitors::torrent::factory` | `TorrentFactory` — build from files on disk |
+| `bitors::magnet` | `MagnetLink` — generate magnet URIs from a `Torrent` |
 | `bitors::error` | Top-level `Error` enum aggregating sub-module errors |
 
 ---
@@ -204,6 +229,49 @@ let torrent = TorrentFactory::from_file("file.iso")?
 ```
 
 [BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
+
+---
+
+## Magnet links
+
+`Torrent::magnet_link()` returns a `MagnetLink` populated with the info hash,
+display name, all tracker URLs, and total content size.
+
+```rust
+use bitors::{parse_torrent, torrent::Torrent};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("ubuntu.torrent")?;
+    let bencode = parse_torrent(&bytes)?;
+    let torrent: Torrent<'_> = (&bencode).try_into()?;
+
+    let link = torrent.magnet_link();
+
+    // Hex format (de-facto standard, same as Display)
+    println!("{link}");
+    // magnet:?xt=urn:btih:<40 hex chars>&dn=Ubuntu%2022.04&xl=...&tr=...
+
+    // Base32 format (also accepted by all major clients)
+    println!("{}", link.to_uri_base32());
+
+    Ok(())
+}
+```
+
+You can also construct a `MagnetLink` directly when you only have an info hash:
+
+```rust
+use bitors::magnet::MagnetLink;
+
+let link = MagnetLink {
+    info_hash: [0xab; 20],
+    name: Some("My Torrent".to_string()),
+    trackers: vec!["udp://tracker.example.com:6969/announce".parse()?],
+    size: Some(1_073_741_824),
+};
+
+println!("{link}");
+```
 
 ---
 

@@ -80,6 +80,7 @@ use url::Url;
 
 use crate::{
     bencode::Bencode,
+    magnet::MagnetLink,
     torrent::{
         builder::TorrentBuilder,
         factory::{TorrentFactory, state::Empty},
@@ -133,7 +134,7 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
 ///
 /// This struct contains all the top-level metadata required by a BitTorrent client
 /// to connect to trackers and understand the contents of the torrent.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Torrent<'a> {
     /// A dictionary that describes the file(s) of the torrent.
     pub info: Info<'a>,
@@ -232,6 +233,30 @@ impl Torrent<'_> {
             FileMode::Single { .. } => 1,
             FileMode::Multi { files } => files.len(),
         }
+    }
+
+    /// Generates a [`MagnetLink`] for this torrent.
+    ///
+    /// The returned value captures the info hash, display name, tracker URLs (flattened
+    /// from all tiers), and total content size.  Convert it to a URI string with
+    /// [`Display`](std::fmt::Display) (hex) or
+    /// [`MagnetLink::to_uri_base32`](crate::magnet::MagnetLink::to_uri_base32).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bitors::{bencode::Parser, torrent::Torrent};
+    ///
+    /// let bytes = std::fs::read("ubuntu.torrent")?;
+    /// let bencode = Parser::new(&bytes).parse()?;
+    /// let torrent: Torrent<'_> = (&bencode).try_into()?;
+    ///
+    /// println!("{}", torrent.magnet_link());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn magnet_link(&self) -> MagnetLink {
+        self.into()
     }
 
     /// Converts the `Torrent` struct back into a `Bencode` representation.
@@ -342,7 +367,7 @@ pub type TorrentBuf = Torrent<'static>;
 ///
 /// This structure holds the critical data describing the payload (the files to download),
 /// including file names, piece sizes, and the cryptographic hashes used to verify data integrity.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Info<'a> {
     /// In the single file case, the name of the file.
     /// In the multiple file case, the name of the directory in which to store all the files.
@@ -481,7 +506,7 @@ pub type InfoBuf = Info<'static>;
 /// Defines the structure of the payload contained within the torrent.
 ///
 /// BitTorrent supports both single-file payloads and multi-file directory payloads.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum FileMode<'a> {
     /// Represents a torrent containing exactly one file.
     Single {
@@ -530,7 +555,7 @@ impl FileMode<'_> {
 pub type FileModeBuf = FileMode<'static>;
 
 /// Metadata for a single file within a multi-file torrent.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct FileInfo<'a> {
     /// The length of the file in bytes.
     pub length: u64,

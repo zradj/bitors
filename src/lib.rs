@@ -16,6 +16,7 @@
 //! |---|---|
 //! | [`bencode`] | Zero-copy Bencode parser and encoder |
 //! | [`torrent`] | `.torrent` metainfo types, parser, builder, and factory |
+//! | [`magnet`] | Magnet link generation ([`magnet::MagnetLink`]) |
 //! | [`error`] | Top-level error enum that aggregates sub-module errors |
 //!
 //! # Parsing a `.torrent` file
@@ -110,6 +111,31 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! # Magnet links
+//!
+//! [`Torrent::magnet_link`](torrent::Torrent::magnet_link) produces a
+//! [`magnet::MagnetLink`] pre-populated with the info hash, display name, all
+//! tracker URLs, and total content size.  Render it as a URI string with
+//! [`Display`](std::fmt::Display) (hex format, the de-facto standard) or with
+//! [`MagnetLink::to_uri_base32`](magnet::MagnetLink::to_uri_base32):
+//!
+//! ```no_run
+//! use bitors::{parse_torrent, torrent::Torrent};
+//!
+//! let bytes = std::fs::read("ubuntu.torrent")?;
+//! let bencode = parse_torrent(&bytes)?;
+//! let torrent: Torrent<'_> = (&bencode).try_into()?;
+//!
+//! let link = torrent.magnet_link();
+//! println!("{link}");                     // hex:    magnet:?xt=urn:btih:<40 hex chars>…
+//! println!("{}", link.to_uri_base32());   // base32: magnet:?xt=urn:btih:<32 Base32 chars>…
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! You can also build a [`magnet::MagnetLink`] by hand when you only have an info
+//! hash and want to attach a custom tracker list.  See the [`magnet`] module docs
+//! for details.
+//!
 //! # Zero-copy design and lifetimes
 //!
 //! [`bencode::Parser`] borrows directly from the source byte slice: all
@@ -174,6 +200,45 @@
 
 #![warn(clippy::pedantic)]
 
+use crate::bencode::Bencode;
+
 pub mod bencode;
 pub mod error;
+pub mod magnet;
 pub mod torrent;
+
+pub use bencode::Parser;
+pub use torrent::Torrent;
+pub use torrent::factory::TorrentFactory;
+
+/// Parses a Bencode byte slice, returning a [`Bencode`] tree.
+///
+/// This is a convenience shortcut that combines [`Parser::new`](bencode::Parser::new)
+/// and [`Parser::parse`](bencode::Parser::parse) into a single call.  It is most
+/// useful as the first step of the full parsing pipeline:
+///
+/// ```no_run
+/// use bitors::{parse_torrent, torrent::Torrent};
+///
+/// let bytes = std::fs::read("ubuntu.torrent")?;
+/// let bencode = parse_torrent(&bytes)?;
+/// let torrent: Torrent<'_> = (&bencode).try_into()?;
+///
+/// println!("Name: {}", torrent.info.name);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// The returned [`Bencode`] borrows directly from `data`, so all byte and string
+/// values inside it point into the original slice without copying.  The `Torrent`
+/// (and any other type derived from the tree) carries the same lifetime.
+///
+/// If you need finer control over the parser — for example, to parse only a
+/// portion of a larger buffer — construct [`bencode::Parser`] directly.
+///
+/// # Errors
+///
+/// Returns [`bencode::Error`] if `data` is not valid Bencode.
+pub fn parse_torrent<'a>(data: &'a [u8]) -> Result<Bencode<'a>, bencode::Error> {
+    let mut parser: Parser<'a> = Parser::new(data);
+    parser.parse()
+}

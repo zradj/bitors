@@ -6,7 +6,9 @@ version = 4
 name = "bitors"
 version = "1.2.0"
 dependencies = [
+ "data-encoding",
  "digest-io",
+ "percent-encoding",
  "sha1",
  "thiserror",
  "url",
@@ -51,6 +53,12 @@ checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
  "hybrid-array",
 ]
+
+[[package]]
+name = "data-encoding"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "digest"

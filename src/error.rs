@@ -10,6 +10,8 @@
 //! [`torrent::Error`](crate::torrent::Error) directly to keep error handling
 //! more precise.
 
+use std::io;
+
 use thiserror::Error;
 
 /// The top-level error enum, aggregating all sub-module errors.
@@ -28,4 +30,6 @@ pub enum Error {
     /// construction layer.
     #[error("Torrent error: {0}")]
     Torrent(#[from] crate::torrent::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
 }

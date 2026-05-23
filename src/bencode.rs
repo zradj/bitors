@@ -84,7 +84,7 @@ use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
 /// let value = Bencode::Int(42);
 /// assert_eq!(value.encode(), b"i42e");
 /// ```
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Bencode<'a> {
     /// A 64-bit signed integer.
     Int(i64),
