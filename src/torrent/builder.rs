@@ -112,6 +112,13 @@ impl TorrentBuilder {
         self
     }
 
+    /// Sets the list of web-seed URLs (`url-list` field, [BEP 19]).
+    ///
+    /// Web seeds allow BitTorrent clients to fall back to HTTP/HTTPS downloads when no
+    /// peers are available.  Each URL should be a direct link to the content described
+    /// by the torrent.  If not set, the field is omitted from the serialized output.
+    ///
+    /// [BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
     #[must_use]
     pub fn url_list(mut self, url_list: Vec<Url>) -> Self {
         self.url_list = Some(url_list);
@@ -134,8 +141,8 @@ impl TorrentBuilder {
     /// by the specification, but extremely long comments may be ignored by some
     /// clients.
     #[must_use]
-    pub fn comment(mut self, comment: &str) -> Self {
-        self.comment = Some(comment.to_string());
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = Some(comment.into());
         self
     }
 
@@ -145,8 +152,8 @@ impl TorrentBuilder {
     /// create the torrent, e.g. `"my-tool/2.3.1"`.  If not set, the field is
     /// omitted from the output.
     #[must_use]
-    pub fn created_by(mut self, created_by: &str) -> Self {
-        self.created_by = Some(created_by.to_string());
+    pub fn created_by(mut self, created_by: impl Into<String>) -> Self {
+        self.created_by = Some(created_by.into());
         self
     }
 
@@ -157,8 +164,8 @@ impl TorrentBuilder {
     /// If not set, the field is omitted — most modern clients assume UTF-8
     /// regardless.
     #[must_use]
-    pub fn encoding(mut self, encoding: &str) -> Self {
-        self.encoding = Some(encoding.to_string());
+    pub fn encoding(mut self, encoding: impl Into<String>) -> Self {
+        self.encoding = Some(encoding.into());
         self
     }
 

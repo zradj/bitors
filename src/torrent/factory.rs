@@ -180,6 +180,14 @@ impl<T> TorrentFactory<T> {
         self
     }
 
+    /// Sets the `source` field in the `info` dictionary.
+    ///
+    /// This field is commonly used by private trackers to tag their copies of a torrent.
+    /// Because `source` is part of the `info` dictionary, changing it alters the info hash,
+    /// making the resulting torrent distinct from copies without the tag (or with a
+    /// different tag).
+    ///
+    /// If not set, the field is omitted from the serialized output.
     #[must_use]
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
@@ -264,12 +272,26 @@ impl<T> TorrentFactory<T> {
         self
     }
 
+    /// Appends a single web-seed URL to the `url-list` field ([BEP 19]).
+    ///
+    /// Web seeds let clients fall back to HTTP/HTTPS downloads when peers are unavailable.
+    /// Each URL should point directly to the content described by the torrent.
+    ///
+    /// [`next_announce_tier`]: TorrentFactory::next_announce_tier
+    ///
+    /// [BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
     #[must_use]
     pub fn add_url(mut self, url: Url) -> Self {
         self.url_list.push(url);
         self
     }
 
+    /// Appends multiple web-seed URLs to the `url-list` field ([BEP 19]).
+    ///
+    /// Equivalent to calling [`add_url`](TorrentFactory::add_url) repeatedly, but
+    /// consumes an iterator instead of a single URL.
+    ///
+    /// [BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
     #[must_use]
     pub fn add_urls<I: IntoIterator<Item = Url>>(mut self, urls: I) -> Self {
         self.url_list.extend(urls);

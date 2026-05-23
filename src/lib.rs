@@ -128,6 +128,31 @@
 //! | `FileMode<'a>` | [`torrent::FileModeBuf`] |
 //! | `FileInfo<'a>` | [`torrent::FileInfoBuf`] |
 //!
+//! # Info hash
+//!
+//! [`torrent::Torrent::info_hash`] returns the 20-byte SHA-1 hash of the Bencoded `info`
+//! dictionary — the canonical identifier exchanged with trackers and embedded in magnet
+//! links.  The same computation is also available directly on [`torrent::Info`] via
+//! [`torrent::Info::info_hash`].
+//!
+//! ```no_run
+//! use bitors::{bencode::Parser, torrent::Torrent};
+//!
+//! let bytes = std::fs::read("ubuntu.torrent")?;
+//! let bencode = Parser::new(&bytes).parse()?;
+//! let torrent: Torrent<'_> = (&bencode).try_into()?;
+//!
+//! let hash = torrent.info_hash();
+//! println!("Info hash: {}", hash.map(|b| format!("{b:02x}")).join(""));
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! # Equality
+//!
+//! [`torrent::Torrent`], [`torrent::Info`], [`torrent::FileMode`], [`torrent::FileInfo`],
+//! and [`bencode::Bencode`] all derive [`PartialEq`] and [`Eq`], so parsed or constructed
+//! values can be compared directly with `==`.
+//!
 //! # Round-trip fidelity
 //!
 //! Any `Torrent` (whether parsed or constructed) can be converted back to a `Bencode` value

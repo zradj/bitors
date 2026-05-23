@@ -13,7 +13,7 @@
 //! Torrent<'a>
 //! ├── announce: Option<Url>
 //! ├── announce_list: Option<Vec<Vec<Url>>>
-//! ├── url_list: Option<Vec<Url>>
+//! ├── url_list: Option<Vec<Url>>         ← web-seed URLs (BEP 19)
 //! ├── creation_date: Option<u64>
 //! ├── comment / created_by / encoding: Option<Cow<'a, str>>
 //! └── info: Info<'a>
@@ -21,6 +21,7 @@
 //!     ├── piece_length: NonZeroU64
 //!     ├── pieces: Cow<'a, [[u8; 20]]>   ← one 20-byte SHA-1 hash per piece
 //!     ├── private: bool
+//!     ├── source: Option<Cow<'a, str>>  ← private-tracker source tag
 //!     └── file_mode: FileMode<'a>
 //!         ├── Single { length, md5sum }
 //!         └── Multi  { files: Vec<FileInfo<'a>> }
@@ -28,6 +29,25 @@
 //!                         ├── md5sum
 //!                         └── path: Vec<Cow<'a, str>>
 //! ```
+//!
+//! # Equality
+//!
+//! [`Torrent`], [`Info`], [`FileMode`], and [`FileInfo`] all derive [`PartialEq`] and
+//! [`Eq`], so you can compare two parsed or constructed values directly:
+//!
+//! ```no_run
+//! # use bitors::{bencode::Parser, torrent::Torrent};
+//! # let bytes1 = Vec::new(); let bytes2 = Vec::new();
+//! let t1: Torrent<'_> = (&Parser::new(&bytes1).parse().unwrap()).try_into().unwrap();
+//! let t2: Torrent<'_> = (&Parser::new(&bytes2).parse().unwrap()).try_into().unwrap();
+//! assert_eq!(t1, t2);
+//! ```
+//!
+//! # Info hash
+//!
+//! [`Torrent::info_hash`] (and its delegate [`Info::info_hash`]) return the 20-byte
+//! SHA-1 hash of the Bencoded `info` dictionary — the standard torrent identifier
+//! exchanged with trackers and embedded in magnet links.
 //!
 //! # Lifetimes and owned variants
 //!
@@ -121,6 +141,11 @@ pub struct Torrent<'a> {
     pub announce: Option<Url>,
     /// An optional list of backup trackers (Tiered trackers).
     pub announce_list: Option<Vec<Vec<Url>>>,
+    /// A list of web-seed URLs ([BEP 19]) from which clients may retrieve content over
+    /// HTTP or HTTPS when peers are scarce.  `None` if the field is absent from the
+    /// `.torrent` file.
+    ///
+    /// [BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
     pub url_list: Option<Vec<Url>>,
     /// The creation time of the torrent, in standard POSIX epoch format.
     pub creation_date: Option<u64>,
@@ -173,11 +198,22 @@ impl Torrent<'_> {
         }
     }
 
+    /// Computes the 20-byte SHA-1 info hash for this torrent.
+    ///
+    /// The info hash is calculated by Bencoding the [`Info`] dictionary and then hashing
+    /// the resulting bytes with SHA-1.  It uniquely identifies the torrent's content to
+    /// trackers and other peers, and is the canonical identifier used in magnet links.
+    ///
+    /// This is a convenience wrapper around [`Info::info_hash`].
     #[must_use]
     pub fn info_hash(&self) -> [u8; 20] {
         self.info.info_hash()
     }
 
+    /// Returns the total size of all content in this torrent, in bytes.
+    ///
+    /// For single-file torrents this is the length of that file.  For multi-file torrents
+    /// this is the sum of the lengths of all files in the torrent.
     #[must_use]
     pub fn total_size(&self) -> u64 {
         match &self.info.file_mode {
@@ -186,6 +222,10 @@ impl Torrent<'_> {
         }
     }
 
+    /// Returns the number of files described by this torrent.
+    ///
+    /// Single-file torrents always return `1`.  Multi-file torrents return the number
+    /// of entries in the `files` list.
     #[must_use]
     pub fn file_count(&self) -> usize {
         match &self.info.file_mode {
@@ -314,12 +354,25 @@ pub struct Info<'a> {
     /// If true, the client must not obtain peer data from the DHT or PEX.
     /// It must only rely on the specified tracker(s).
     pub private: bool,
+    /// An optional source tag, commonly set by private trackers to distinguish their
+    /// copies of a torrent from copies seeded elsewhere.  Changing this field produces
+    /// a different info hash, so two torrents with the same files but different `source`
+    /// values are treated as distinct by clients.
     pub source: Option<Cow<'a, str>>,
     /// Dictates whether this torrent represents a single file or a directory of multiple files.
     pub file_mode: FileMode<'a>,
 }
 
 impl Info<'_> {
+    /// Computes the 20-byte SHA-1 info hash of this `Info` dictionary.
+    ///
+    /// The hash is produced by Bencoding the dictionary and feeding the resulting bytes
+    /// into SHA-1.  This value is the canonical torrent identifier: it is exchanged with
+    /// trackers, embedded in magnet links, and used by peers to confirm they are sharing
+    /// the same content.
+    ///
+    /// Because Bencode encoding is deterministic, two `Info` values that compare equal
+    /// via [`PartialEq`] will always produce the same hash.
     #[must_use]
     pub fn info_hash(&self) -> [u8; 20] {
         let mut hasher = digest_io::IoWrapper(Sha1::new());

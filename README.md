@@ -21,7 +21,7 @@ Add `bitors` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bitors = "1.1.2"
+bitors = "1.2.0"
 ```
 
 ---
@@ -45,6 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Piece length: {} bytes", torrent.info.piece_length);
     println!("Pieces:       {}", torrent.info.pieces.len());
     println!("Trackers:     {:?}", torrent.trackers());
+    println!("Total size:   {} bytes", torrent.total_size());
+    println!("File count:   {}", torrent.file_count());
+
+    let hash = torrent.info_hash();
+    println!("Info hash:    {}", hash.map(|b| format!("{b:02x}")).join(""));
 
     Ok(())
 }
@@ -128,6 +133,19 @@ let torrent = Torrent::builder(make_info())
 
 ---
 
+## Info hash
+
+`Torrent::info_hash` (and its delegate `Info::info_hash`) return the 20-byte SHA-1 hash
+of the Bencoded `info` dictionary — the canonical torrent identifier exchanged with
+trackers and embedded in magnet links:
+
+```rust
+let hash = torrent.info_hash();
+println!("{}", hash.map(|b| format!("{b:02x}")).join(""));
+```
+
+---
+
 ## Zero-copy design and lifetimes
 
 `Parser` borrows from the source buffer. Every type produced by parsing carries a
@@ -167,6 +185,25 @@ The first URL of the first tier is also written to the top-level `announce` key
 for compatibility with older clients.
 
 [BEP 12]: https://www.bittorrent.org/beps/bep_0012.html
+
+---
+
+## Web seeds (BEP 19)
+
+The `url_list` field on `Torrent` holds a list of HTTP/HTTPS URLs from which clients
+may download content when peers are scarce. Both `TorrentFactory` and `TorrentBuilder`
+expose builder methods for populating this list:
+
+```rust
+use bitors::torrent::factory::TorrentFactory;
+
+let torrent = TorrentFactory::from_file("file.iso")?
+    .add_url("https://mirror.example.com/file.iso".parse()?)
+    .add_announce("udp://tracker.example.com:6969/announce".parse()?)
+    .build()?;
+```
+
+[BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
 
 ---
 
