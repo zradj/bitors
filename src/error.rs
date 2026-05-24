@@ -1,6 +1,6 @@
 //! Top-level error type for the `bitors` crate.
 //!
-//! [`Error`] aggregates the two sub-module error types so that code which calls
+//! [`enum@Error`] aggregates the two sub-module error types so that code which calls
 //! both the [`bencode`](crate::bencode) parser and the [`torrent`](crate::torrent)
 //! layer can use a single `?` operator and a single error type in its return
 //! signature.

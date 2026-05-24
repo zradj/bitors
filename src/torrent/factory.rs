@@ -247,7 +247,7 @@ impl<T> TorrentFactory<T> {
 
     /// Begins a new announce tier.
     ///
-    /// Subsequent calls to [`add_announce`] / [`add_announces`] will add URLs to this new
+    /// Subsequent calls to [`Self::add_announce`] / [`Self::add_announces`] will add URLs to this new
     /// tier rather than the previous one.  If the current tier is already empty this method
     /// is a no-op (empty tiers are not created).
     ///

@@ -43,8 +43,7 @@
 //! # Torrent conversion
 //!
 //! The module also contains `From` implementations that convert
-//! [`Torrent`](crate::torrent::Torrent), [`Info`](crate::torrent::Info), and
-//! [`FileInfo`](crate::torrent::FileInfo) references into their `Bencode`
+//! [`Torrent`], [`Info`], and [`FileInfo`] references into their `Bencode`
 //! equivalents.  All conversions borrow data from the source value, so no
 //! string or byte data is copied.
 
@@ -501,7 +500,7 @@ impl<'a> Parser<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an [`Error`] if the data is malformed, unexpectedly truncated,
+    /// Returns an [`enum@Error`] if the data is malformed, unexpectedly truncated,
     /// or exceeds the configured depth limit.
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
         self.parse_internal(0)

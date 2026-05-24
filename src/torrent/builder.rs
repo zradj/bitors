@@ -1,8 +1,8 @@
 //! Assembles a [`TorrentBuf`] from a pre-built [`InfoBuf`] and optional metadata.
 //!
 //! [`TorrentBuilder`] is the right tool when you already hold a fully constructed
-//! [`InfoBuf`] — for example, one produced by [`TorrentFactory`] or extracted from
-//! an existing `.torrent` file — and you want to wrap it in a top-level
+//! [`InfoBuf`] — for example, one produced by [`TorrentFactory`](crate::torrent::factory::TorrentFactory)
+//! or extracted from an existing `.torrent` file — and you want to wrap it in a top-level
 //! [`Torrent`](crate::torrent::Torrent) with tracker URLs and descriptive fields.
 //!
 //! If you need the library to read source files from disk and compute piece hashes
