@@ -21,23 +21,33 @@
 //!
 //! # Parsing a `.torrent` file
 //!
-//! The typical parsing pipeline has three steps:
-//!
-//! 1. Feed raw bytes into [`bencode::Parser`] to get a generic [`bencode::Bencode`] tree.
-//! 2. Convert the tree into a typed [`torrent::Torrent`] with [`TryFrom`] / [`TryInto`].
-//! 3. Use the resulting struct to inspect trackers, file lists, and piece hashes.
+//! The simplest path is [`parse_torrent`], which reads a byte slice and returns
+//! a fully typed [`torrent::Torrent`] in one call:
 //!
 //! ```no_run
-//! use std::{fs, io::Read};
-//! use bitors::{
-//!     bencode::Parser,
-//!     torrent::Torrent,
-//! };
+//! use bitors::{parse_torrent, torrent::Torrent};
 //!
-//! let bytes = fs::read("ubuntu.torrent")?;
-//! let mut parser = Parser::new(&bytes);
-//! let bencode = parser.parse()?;
-//! let torrent: Torrent<'_> = (&bencode).try_into()?;
+//! let bytes = std::fs::read("ubuntu.torrent")?;
+//! let torrent = parse_torrent(&bytes)?;
+//!
+//! println!("Name:         {}", torrent.info.name);
+//! println!("Piece length: {}", torrent.info.piece_length);
+//! println!("Trackers:     {:?}", torrent.trackers());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ## Manual pipeline
+//!
+//! When you need finer control — for example, to inspect the raw [`bencode::Bencode`]
+//! tree before converting, or to parse only a sub-slice of a larger buffer — use
+//! [`bencode::Parser`] directly and then convert the tree by value:
+//!
+//! ```no_run
+//! use bitors::{bencode::Parser, torrent::Torrent};
+//!
+//! let bytes = std::fs::read("ubuntu.torrent")?;
+//! let bencode = Parser::new(&bytes).parse()?;
+//! let torrent: Torrent<'_> = bencode.try_into()?;
 //!
 //! println!("Name:         {}", torrent.info.name);
 //! println!("Piece length: {}", torrent.info.piece_length);
@@ -120,11 +130,10 @@
 //! [`MagnetLink::to_uri_base32`](magnet::MagnetLink::to_uri_base32):
 //!
 //! ```no_run
-//! use bitors::{parse_torrent, torrent::Torrent};
+//! use bitors::parse_torrent;
 //!
 //! let bytes = std::fs::read("ubuntu.torrent")?;
-//! let bencode = parse_torrent(&bytes)?;
-//! let torrent: Torrent<'_> = (&bencode).try_into()?;
+//! let torrent = parse_torrent(&bytes)?;
 //!
 //! let link = torrent.magnet_link();
 //! println!("{link}");                     // hex:    magnet:?xt=urn:btih:<40 hex chars>…
@@ -162,11 +171,10 @@
 //! [`torrent::Info::info_hash`].
 //!
 //! ```no_run
-//! use bitors::{bencode::Parser, torrent::Torrent};
+//! use bitors::parse_torrent;
 //!
 //! let bytes = std::fs::read("ubuntu.torrent")?;
-//! let bencode = Parser::new(&bytes).parse()?;
-//! let torrent: Torrent<'_> = (&bencode).try_into()?;
+//! let torrent = parse_torrent(&bytes)?;
 //!
 //! let hash = torrent.info_hash();
 //! println!("Info hash: {}", hash.map(|b| format!("{b:02x}")).join(""));
@@ -200,8 +208,6 @@
 
 #![warn(clippy::pedantic)]
 
-use crate::bencode::Bencode;
-
 pub mod bencode;
 pub mod error;
 pub mod magnet;
@@ -211,34 +217,35 @@ pub use bencode::Parser;
 pub use torrent::Torrent;
 pub use torrent::factory::TorrentFactory;
 
-/// Parses a Bencode byte slice, returning a [`Bencode`] tree.
+use crate::error::Error;
+
+/// Parses a Bencode byte slice and converts it into a [`Torrent`] in one call.
 ///
-/// This is a convenience shortcut that combines [`Parser::new`](bencode::Parser::new)
-/// and [`Parser::parse`](bencode::Parser::parse) into a single call.  It is most
-/// useful as the first step of the full parsing pipeline:
+/// This is the most convenient entry point for the common case of reading a
+/// `.torrent` file and immediately working with its contents.  Internally it
+/// creates a [`bencode::Parser`], parses the bytes into a [`bencode::Bencode`]
+/// tree, and then **consumes** that tree via [`TryFrom<Bencode>`] to produce a
+/// `Torrent<'a>`.  Because the conversion is consuming, the returned
+/// `Torrent<'a>` borrows directly from `data` — not from any intermediate value.
 ///
 /// ```no_run
-/// use bitors::{parse_torrent, torrent::Torrent};
+/// use bitors::parse_torrent;
 ///
 /// let bytes = std::fs::read("ubuntu.torrent")?;
-/// let bencode = parse_torrent(&bytes)?;
-/// let torrent: Torrent<'_> = (&bencode).try_into()?;
+/// let torrent = parse_torrent(&bytes)?;
 ///
 /// println!("Name: {}", torrent.info.name);
+/// println!("Info hash: {}", torrent.info_hash().map(|b| format!("{b:02x}")).join(""));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
-/// The returned [`Bencode`] borrows directly from `data`, so all byte and string
-/// values inside it point into the original slice without copying.  The `Torrent`
-/// (and any other type derived from the tree) carries the same lifetime.
-///
-/// If you need finer control over the parser — for example, to parse only a
-/// portion of a larger buffer — construct [`bencode::Parser`] directly.
+/// If you need to inspect or reuse the intermediate [`bencode::Bencode`] tree,
+/// call [`bencode::Parser`] directly and then call `.try_into()` on the result.
 ///
 /// # Errors
 ///
-/// Returns [`bencode::Error`] if `data` is not valid Bencode.
-pub fn parse_torrent<'a>(data: &'a [u8]) -> Result<Bencode<'a>, bencode::Error> {
-    let mut parser: Parser<'a> = Parser::new(data);
-    parser.parse()
+/// Returns [`Error`] if `data` is not valid Bencode, or if the Bencode structure
+/// does not conform to the BitTorrent metainfo specification.
+pub fn parse_torrent(data: &[u8]) -> Result<Torrent<'_>, Error> {
+    Ok(Parser::new(data).parse()?.try_into()?)
 }

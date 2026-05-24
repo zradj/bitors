@@ -21,49 +21,23 @@ Add `bitors` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bitors = "1.2.0"
+bitors = "2.0.0"
 ```
 
 ---
 
 ## Quick start
 
-### Parsing a `.torrent` file (shortcut)
+### Parsing a `.torrent` file
 
-When you only need the raw Bencode tree as an intermediate step, `parse_torrent`
-collapses `Parser::new` + `.parse()` into a single call:
+`parse_torrent` reads a byte slice and returns a fully typed `Torrent` in one call:
 
 ```rust
-use bitors::{parse_torrent, torrent::Torrent};
+use bitors::parse_torrent;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read("ubuntu.torrent")?;
-
-    let bencode = parse_torrent(&bytes)?;
-    let torrent: Torrent<'_> = (&bencode).try_into()?;
-
-    println!("Name: {}", torrent.info.name);
-    Ok(())
-}
-```
-
-For full control over the parser (e.g. to parse a sub-slice), construct
-[`Parser`](https://docs.rs/bitors/latest/bitors/bencode/struct.Parser.html) directly.
-
----
-
-### Parsing a `.torrent` file (manual pipeline)
-
-```rust
-use std::fs;
-use bitors::{bencode::Parser, torrent::Torrent};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = fs::read("ubuntu.torrent")?;
-
-    let mut parser = Parser::new(&bytes);
-    let bencode = parser.parse()?;
-    let torrent: Torrent<'_> = (&bencode).try_into()?;
+    let torrent = parse_torrent(&bytes)?;
 
     println!("Name:         {}", torrent.info.name);
     println!("Piece length: {} bytes", torrent.info.piece_length);
@@ -79,9 +53,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`Parser` borrows directly from your byte slice — string and byte fields in the
+`parse_torrent` borrows directly from your byte slice — string and byte fields in the
 returned `Torrent<'_>` point into `bytes` without copying. Call `.into_owned()` if
 you need a value that outlives the buffer.
+
+If you need to inspect the intermediate `Bencode` tree, or to parse only a sub-slice
+of a larger buffer, use `Parser` directly and call `.try_into()` on the result:
+
+```rust
+use bitors::{bencode::Parser, torrent::Torrent};
+
+let bytes = std::fs::read("ubuntu.torrent")?;
+let torrent: Torrent<'_> = Parser::new(&bytes).parse()?.try_into()?;
+```
+
+The `TryFrom<Bencode>` impl **consumes** the tree, so the `Torrent<'_>` borrows
+directly from the original byte slice.
 
 ---
 
@@ -238,12 +225,11 @@ let torrent = TorrentFactory::from_file("file.iso")?
 display name, all tracker URLs, and total content size.
 
 ```rust
-use bitors::{parse_torrent, torrent::Torrent};
+use bitors::parse_torrent;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read("ubuntu.torrent")?;
-    let bencode = parse_torrent(&bytes)?;
-    let torrent: Torrent<'_> = (&bencode).try_into()?;
+    let torrent = parse_torrent(&bytes)?;
 
     let link = torrent.magnet_link();
 

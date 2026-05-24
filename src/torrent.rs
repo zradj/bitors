@@ -1,7 +1,7 @@
 //! Types and logic for `.torrent` metainfo files.
 //!
 //! This module contains the complete type hierarchy that mirrors the structure
-//! of a BitTorrent metainfo file, along with parsing (via [`TryFrom<&Bencode>`])
+//! of a BitTorrent metainfo file, along with parsing (via [`TryFrom<Bencode>`])
 //! and two construction paths:
 //!
 //! - [`builder::TorrentBuilder`] — wraps an [`InfoBuf`] you already have.
@@ -38,8 +38,8 @@
 //! ```no_run
 //! # use bitors::{bencode::Parser, torrent::Torrent};
 //! # let bytes1 = Vec::new(); let bytes2 = Vec::new();
-//! let t1: Torrent<'_> = (&Parser::new(&bytes1).parse().unwrap()).try_into().unwrap();
-//! let t2: Torrent<'_> = (&Parser::new(&bytes2).parse().unwrap()).try_into().unwrap();
+//! let t1: Torrent<'_> = Parser::new(&bytes1).parse().unwrap().try_into().unwrap();
+//! let t2: Torrent<'_> = Parser::new(&bytes2).parse().unwrap().try_into().unwrap();
 //! assert_eq!(t1, t2);
 //! ```
 //!
@@ -89,41 +89,52 @@ use crate::{
 
 /// An internal extension trait for `BTreeMap` to simplify extracting optional
 /// and required fields from Bencoded dictionaries.
+///
+/// All methods take `&mut self` and **remove** the entry from the map, transferring
+/// ownership of the `Bencode<'a>` value to the caller.  This is essential for
+/// consuming `TryFrom` impls: the map is obtained via [`Bencode::into_dict`], so
+/// its entries carry lifetime `'a` (borrowed from the original source buffer), and
+/// returning them by value rather than by reference keeps that lifetime intact after
+/// the map itself is dropped.
 trait DictExt<'a> {
-    /// Retrieves a reference to the value associated with the given byte slice key.
-    fn opt(&self, key: &[u8]) -> Option<&Bencode<'a>>;
+    /// Removes the entry for `key` and returns the owned value, or `None` if absent.
+    fn opt(&mut self, key: &[u8]) -> Option<Bencode<'a>>;
 
-    /// Retrieves a reference to the value, returning an error if the key is missing.
-    fn require(&self, key: &[u8]) -> Result<&Bencode<'a>, Error>;
+    /// Removes the entry for `key` and returns the owned value, or an error if absent.
+    fn require(&mut self, key: &[u8]) -> Result<Bencode<'a>, Error>;
 
-    /// Retrieves a string value, returning `None` if the key is missing.
-    /// Returns an error if the key exists but is not a valid string.
-    fn opt_str(&self, key: &[u8]) -> Result<Option<&str>, Error>;
+    /// Removes the entry for `key` and returns it interpreted as a UTF-8 string.
+    ///
+    /// Returns `Ok(None)` if the key is absent, `Ok(Some(&str))` if present and
+    /// valid UTF-8, or an error if the value is not a byte string or is not valid
+    /// UTF-8.
+    fn opt_str(&mut self, key: &[u8]) -> Result<Option<&'a str>, Error>;
 
-    /// Retrieves a string value, returning an error if the key is missing or not a string.
-    fn require_str(&self, key: &[u8]) -> Result<&str, Error>;
+    /// Removes the entry for `key` and returns it interpreted as a UTF-8 string,
+    /// or an error if the key is absent or the value is not a valid UTF-8 string.
+    fn require_str(&mut self, key: &[u8]) -> Result<&'a str, Error>;
 }
 
 impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
     /// Removes the need in `b"...".as_slice()` in normal `BTreeMap::get` calls.
-    fn opt(&self, key: &[u8]) -> Option<&Bencode<'a>> {
-        self.get(key)
+    fn opt(&mut self, key: &[u8]) -> Option<Bencode<'a>> {
+        self.remove(key)
     }
-
-    fn opt_str(&self, key: &[u8]) -> Result<Option<&str>, Error> {
-        self.opt(key)
-            .map(Bencode::as_str)
-            .transpose()
-            .map_err(Error::from)
-    }
-
-    fn require(&self, key: &[u8]) -> Result<&Bencode<'a>, Error> {
+    
+    fn require(&mut self, key: &[u8]) -> Result<Bencode<'a>, Error> {
         self.opt(key).ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
         ))
     }
 
-    fn require_str(&self, key: &[u8]) -> Result<&str, Error> {
+    fn opt_str(&mut self, key: &[u8]) -> Result<Option<&'a str>, Error> {
+        self.opt(key)
+            .map(|b| b.as_str())
+            .transpose()
+            .map_err(Error::from)
+    }
+
+    fn require_str(&mut self, key: &[u8]) -> Result<&'a str, Error> {
         self.opt_str(key)?.ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
         ))
@@ -245,11 +256,10 @@ impl Torrent<'_> {
     /// # Example
     ///
     /// ```no_run
-    /// use bitors::{bencode::Parser, torrent::Torrent};
+    /// use bitors::parse_torrent;
     ///
     /// let bytes = std::fs::read("ubuntu.torrent")?;
-    /// let bencode = Parser::new(&bytes).parse()?;
-    /// let torrent: Torrent<'_> = (&bencode).try_into()?;
+    /// let torrent = parse_torrent(&bytes)?;
     ///
     /// println!("{}", torrent.magnet_link());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -285,7 +295,7 @@ impl Torrent<'_> {
     }
 }
 
-impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
+impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
     type Error = Error;
 
     /// Attempts to parse a `Torrent` from a generic `Bencode` structure.
@@ -297,8 +307,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Torrent<'a> {
     /// - The required `info` field is missing or invalid.
     /// - Announce URLs are malformed.
     /// - Data types for specific fields do not match the specification.
-    fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
-        let map = bencode.as_dict()?;
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let mut map = bencode.into_dict()?;
 
         let info: Info<'_> = map.require(b"info")?.try_into()?;
 
@@ -429,7 +439,7 @@ impl Info<'_> {
     }
 }
 
-impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
+impl<'a> TryFrom<Bencode<'a>> for Info<'a> {
     type Error = Error;
 
     /// Attempts to parse an `Info` struct from a `Bencode` dictionary.
@@ -438,8 +448,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
     ///
     /// Returns an `Error` if required fields are missing, if `pieces` is not
     /// perfectly divisible by 20 bytes, or if data types are incorrect.
-    fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
-        let map = bencode.as_dict()?;
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let mut map = bencode.into_dict()?;
 
         let name = map.require_str(b"name")?;
 
@@ -469,8 +479,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for Info<'a> {
 
         let file_mode = if let Some(b) = map.opt(b"files") {
             let files = b
-                .as_list()?
-                .iter()
+                .into_list()?
+                .into_iter()
                 .map(FileInfo::try_from)
                 .collect::<Result<Vec<FileInfo>, _>>()?;
 
@@ -603,7 +613,7 @@ impl FileInfo<'_> {
     }
 }
 
-impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
+impl<'a> TryFrom<Bencode<'a>> for FileInfo<'a> {
     type Error = Error;
 
     /// Attempts to parse a `FileInfo` struct from a `Bencode` dictionary.
@@ -611,8 +621,8 @@ impl<'a> TryFrom<&'a Bencode<'a>> for FileInfo<'a> {
     /// # Errors
     ///
     /// Returns an error if the `length` or `path` fields are missing or invalid.
-    fn try_from(bencode: &'a Bencode<'a>) -> Result<Self, Self::Error> {
-        let map = bencode.as_dict()?;
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let mut map = bencode.into_dict()?;
 
         let length = map
             .require(b"length")?
@@ -693,7 +703,7 @@ mod tests {
         map.insert(&b"length"[..], Bencode::Int(1_024_000));
 
         let bencode = Bencode::Dict(map);
-        let info = Info::try_from(&bencode).expect("Failed to parse valid single-file info");
+        let info = Info::try_from(bencode).expect("Failed to parse valid single-file info");
 
         assert_eq!(info.name, "ubuntu.iso");
         assert_eq!(info.piece_length, NonZeroU64::new(262_144).unwrap());
@@ -727,7 +737,7 @@ mod tests {
         map.insert(&b"files"[..], Bencode::List(vec![file_bencode]));
 
         let bencode = Bencode::Dict(map);
-        let info = Info::try_from(&bencode).expect("Failed to parse valid multi-file info");
+        let info = Info::try_from(bencode).expect("Failed to parse valid multi-file info");
 
         assert_eq!(info.name, "my_folder");
 
@@ -753,8 +763,7 @@ mod tests {
         map.insert(&b"pieces"[..], Bencode::Bytes(&invalid_pieces));
 
         let bencode = Bencode::Dict(map);
-        let err =
-            Info::try_from(&bencode).expect_err("Should have failed on invalid pieces length");
+        let err = Info::try_from(bencode).expect_err("Should have failed on invalid pieces length");
 
         assert!(matches!(err, Error::InvalidPiecesLength));
     }
@@ -778,7 +787,7 @@ mod tests {
         torrent_map.insert(&b"creation date"[..], Bencode::Int(1_620_000_000));
 
         let bencode = Bencode::Dict(torrent_map);
-        let torrent = Torrent::try_from(&bencode).expect("Failed to parse valid torrent");
+        let torrent = Torrent::try_from(bencode).expect("Failed to parse valid torrent");
 
         assert_eq!(
             torrent.announce.unwrap().as_str(),
@@ -811,7 +820,7 @@ mod tests {
 
         let bencode = Bencode::Dict(torrent_map);
         let torrent =
-            Torrent::try_from(&bencode).expect("Failed to parse valid torrent with announce-list");
+            Torrent::try_from(bencode).expect("Failed to parse valid torrent with announce-list");
 
         let announce_list = torrent.announce_list.unwrap();
         assert_eq!(announce_list.len(), 2);

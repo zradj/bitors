@@ -55,7 +55,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::torrent::{self, FileInfo, FileMode, Info, Torrent};
+use crate::torrent::{FileInfo, FileMode, Info, Torrent};
 
 /// Represents a parsed Bencode value.
 ///
@@ -101,45 +101,6 @@ pub enum Bencode<'a> {
 }
 
 impl<'a> Bencode<'a> {
-    /// Attempts to interpret this value as a [`Torrent`].
-    ///
-    /// This is a convenience wrapper around the [`TryInto`] implementation for
-    /// `Torrent`. The value must be a `Bencode::Dict` whose structure matches the
-    /// BitTorrent metainfo file format.
-    ///
-    /// # Errors
-    /// Returns a [`torrent::Error`] if the value cannot be interpreted as a
-    /// valid `Torrent`.
-    pub fn try_to_torrent(&self) -> Result<Torrent<'_>, torrent::Error> {
-        self.try_into()
-    }
-
-    /// Attempts to interpret this value as an [`Info`] dictionary.
-    ///
-    /// This is a convenience wrapper around the [`TryInto`] implementation for
-    /// `Info`. The value must be a `Bencode::Dict` containing the required
-    /// info-dictionary fields.
-    ///
-    /// # Errors
-    /// Returns a [`torrent::Error`] if the value cannot be interpreted as a
-    /// valid `Info`.
-    pub fn try_to_info(&self) -> Result<Info<'_>, torrent::Error> {
-        self.try_into()
-    }
-
-    /// Attempts to interpret this value as a [`FileInfo`] entry.
-    ///
-    /// This is a convenience wrapper around the [`TryInto`] implementation for
-    /// `FileInfo`. The value must be a `Bencode::Dict` containing the required
-    /// file-entry fields.
-    ///
-    /// # Errors
-    /// Returns a [`torrent::Error`] if the value cannot be interpreted as a
-    /// valid `FileInfo`.
-    pub fn try_to_file_info(&self) -> Result<FileInfo<'_>, torrent::Error> {
-        self.try_into()
-    }
-
     /// Attempts to unwrap the value as an integer.
     ///
     /// # Errors
@@ -155,7 +116,7 @@ impl<'a> Bencode<'a> {
     ///
     /// # Errors
     /// Returns [`Error::WrongType`] if the variant is not `Bencode::Bytes`.
-    pub fn as_bytes(&self) -> Result<&[u8], Error> {
+    pub fn as_bytes(&self) -> Result<&'a [u8], Error> {
         match self {
             Self::Bytes(b) => Ok(b),
             _ => Err(Error::WrongType { expected: "bytes" }),
@@ -189,9 +150,33 @@ impl<'a> Bencode<'a> {
     /// # Errors
     /// Returns [`Error::WrongType`] if the variant is not `Bencode::Bytes`,
     /// or [`Error::InvalidUtf8`] if the bytes are not valid UTF-8.
-    pub fn as_str(&self) -> Result<&str, Error> {
+    pub fn as_str(&self) -> Result<&'a str, Error> {
         let bytes = self.as_bytes()?;
         Ok(std::str::from_utf8(bytes)?)
+    }
+
+    /// Consumes the value and returns the inner list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the variant is not `Bencode::List`.
+    pub fn into_list(self) -> Result<Vec<Bencode<'a>>, Error> {
+        match self {
+            Self::List(l) => Ok(l),
+            _ => Err(Error::WrongType { expected: "list" }),
+        }
+    }
+
+    /// Consumes the value and returns the inner dictionary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the variant is not `Bencode::Dict`.
+    pub fn into_dict(self) -> Result<BTreeMap<&'a [u8], Bencode<'a>>, Error> {
+        match self {
+            Self::Dict(d) => Ok(d),
+            _ => Err(Error::WrongType { expected: "dict" }),
+        }
     }
 
     /// Encodes this value into a freshly allocated byte vector.

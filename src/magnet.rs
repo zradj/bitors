@@ -10,16 +10,15 @@
 //!
 //! # Creating a magnet link
 //!
-//! The most common path is to convert a parsed or constructed [`Torrent`] directly:
+//! The most common path is to convert a parsed or constructed [`Torrent`] directly
+//! via [`Torrent::magnet_link`]:
 //!
 //! ```no_run
-//! use bitors::{bencode::Parser, torrent::Torrent};
+//! use bitors::parse_torrent;
 //!
 //! let bytes = std::fs::read("ubuntu.torrent")?;
-//! let bencode = Parser::new(&bytes).parse()?;
-//! let torrent: Torrent<'_> = (&bencode).try_into()?;
+//! let torrent = parse_torrent(&bytes)?;
 //!
-//! // Convenience method on Torrent
 //! let link = torrent.magnet_link();
 //! println!("{link}");   // magnet:?xt=urn:btih:<hex-hash>&dn=...&tr=...
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -77,11 +76,10 @@ use crate::torrent::Torrent;
 /// # Example
 ///
 /// ```no_run
-/// use bitors::{bencode::Parser, torrent::Torrent};
+/// use bitors::parse_torrent;
 ///
 /// let bytes = std::fs::read("ubuntu.torrent")?;
-/// let bencode = Parser::new(&bytes).parse()?;
-/// let torrent: Torrent<'_> = (&bencode).try_into()?;
+/// let torrent = parse_torrent(&bytes)?;
 ///
 /// let link = torrent.magnet_link();
 /// println!("{link}");
