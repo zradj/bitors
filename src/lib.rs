@@ -79,8 +79,8 @@
 //! // Single-file torrent
 //! let torrent = TorrentFactory::new()
 //!     .piece_length(NonZeroU64::new(512 * 1024).unwrap())
-//!     .add_announce(Url::parse("udp://tracker.example.com:6969/announce")?)
-//!     .add_file("path/to/file.iso")?
+//!     .add_announce_url(Url::parse("udp://tracker.example.com:6969/announce")?)
+//!     .add_path("path/to/file.iso")?
 //!     .build()?;
 //!
 //! // Serialize to a .torrent file
@@ -89,18 +89,18 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! For multi-file (directory) torrents, use [`TorrentFactory::from_directory`]:
+//! For multi-file (directory) torrents, use [`TorrentFactory::from_path`]:
 //!
 //! ```no_run
 //! use bitors::torrent::factory::TorrentFactory;
 //!
-//! let torrent = TorrentFactory::from_directory("path/to/my-album/")?
+//! let torrent = TorrentFactory::from_path("path/to/my-album/")?
 //!     .private()
 //!     .build()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! [`TorrentFactory::from_directory`]: torrent::factory::TorrentFactory::from_directory
+//! [`TorrentFactory::from_path`]: torrent::factory::TorrentFactory::from_path
 //!
 //! ## `TorrentBuilder` — assemble from an existing `Info`
 //!

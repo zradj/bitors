@@ -10,10 +10,9 @@
 //!
 //! 1. Start with [`TorrentFactory::new`] (or [`TorrentFactory::default`]).
 //! 2. Optionally configure metadata (name, piece length, announce URLs, …).
-//! 3. Supply at least one source via [`add_file`](TorrentFactory::add_file),
-//!    [`add_files`](TorrentFactory::add_files), or the convenience constructors
-//!    [`TorrentFactory::from_file`], [`TorrentFactory::from_files`], or
-//!    [`TorrentFactory::from_directory`].
+//! 3. Supply at least one source via [`add_path`](TorrentFactory::add_path) or
+//!    [`add_paths`](TorrentFactory::add_paths), or use the convenience constructors
+//!    [`TorrentFactory::from_path`] and [`TorrentFactory::from_paths`].
 //! 4. Call [`build`](TorrentFactory::build) to produce the serialisable [`TorrentBuf`].
 //!
 //! # Examples
@@ -29,8 +28,8 @@
 //!     let torrent = TorrentFactory::new()
 //!         .name("my-release")
 //!         .piece_length(NonZeroU64::new(512 * 1024).unwrap())
-//!         .add_announce(Url::parse("udp://tracker.example.com:6969/announce").unwrap())
-//!         .add_file("path/to/file.iso")?
+//!         .add_announce_url(Url::parse("udp://tracker.example.com:6969/announce").unwrap())
+//!         .add_path("path/to/file.iso")?
 //!         .build()?;
 //!
 //!     // Do other stuff
@@ -45,7 +44,7 @@
 //! use bitors::torrent::factory::{TorrentFactory, Error};
 //!
 //! fn main() -> Result<(), Error> {
-//!     let torrent = TorrentFactory::from_directory("path/to/my-album/")?
+//!     let torrent = TorrentFactory::from_path("path/to/my-album/")?
 //!         .private()
 //!         .build()?;
 //!
@@ -65,12 +64,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use path_clean::clean;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 use url::Url;
 use walkdir::WalkDir;
 
-use crate::torrent::{FileInfo, FileMode, Info, Torrent, TorrentBuf};
+use crate::torrent::{FileInfo, FileMode, Info, Torrent, TorrentBuf, factory::state::HasFiles};
 
 /// Typestate markers that encode whether the factory has been given source files yet.
 ///
@@ -115,16 +115,16 @@ fn piece_length_usize(piece_length: NonZeroU64) -> Result<usize, Error> {
 ///
 /// # Default values
 ///
-/// | Field           | Default                                     |
-/// |-----------------|---------------------------------------------|
-/// | `piece_length`  | 512 KiB (`512 * 1024` bytes)                |
-/// | `creation_date` | Current UNIX timestamp                      |
-/// | `name`          | File name of the first source file          |
-/// | `private`       | `false`                                     |
-/// | `announce_list` | Empty (no trackers)                         |
+/// | Field           | Default                                                                  |
+/// |-----------------|--------------------------------------------------------------------------|
+/// | `piece_length`  | 512 KiB (`512 * 1024` bytes)                                             |
+/// | `creation_date` | Current UNIX timestamp                                                   |
+/// | `name`          | Single-file: the filename. Multi-file: last component of the common path prefix, or `"New Torrent"` if no common prefix exists. |
+/// | `private`       | `false`                                                                  |
+/// | `announce_list` | Empty (no trackers)                                                      |
 #[derive(Debug)]
 pub struct TorrentFactory<State> {
-    files: Vec<PathBuf>,
+    files: Vec<(PathBuf, u64)>,
     name: Option<String>,
     piece_length: Option<NonZeroU64>,
     private: bool,
@@ -142,10 +142,11 @@ pub struct TorrentFactory<State> {
 impl<T> TorrentFactory<T> {
     /// Sets the torrent's display name.
     ///
-    /// If not set, the name defaults to the file name of the first source file (single-file
-    /// mode) or the directory name (when constructed via [`from_directory`]).
-    ///
-    /// [`from_directory`]: TorrentFactory::from_directory
+    /// If not set, the name is derived automatically: for a single-file torrent it is
+    /// the filename; for a multi-file torrent it is the last component of the common
+    /// path prefix shared by all source files, or `"New Torrent"` if no common prefix
+    /// exists.  See [`from_path`](TorrentFactory::from_path) and
+    /// [`from_paths`](TorrentFactory::from_paths) for details.
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
@@ -160,10 +161,6 @@ impl<T> TorrentFactory<T> {
     /// between 256 KiB and 16 MiB.
     ///
     /// Defaults to 512 KiB if not set.
-    ///
-    /// # Panics
-    ///
-    /// Does not panic; use [`NonZeroU64::new`] to construct the argument safely.
     #[must_use]
     pub fn piece_length(mut self, piece_length: NonZeroU64) -> Self {
         self.piece_length = Some(piece_length);
@@ -228,26 +225,25 @@ impl<T> TorrentFactory<T> {
     ///
     /// [`next_announce_tier`]: TorrentFactory::next_announce_tier
     #[must_use]
-    pub fn add_announce(mut self, announce: Url) -> Self {
+    pub fn add_announce_url(mut self, announce: Url) -> Self {
         self.get_last_announce_tier().push(announce);
         self
     }
 
     /// Appends multiple tracker URLs to the *current* announce tier.
     ///
-    /// Equivalent to calling [`add_announce`] repeatedly, but consumes an iterator instead
-    /// of a single URL.
-    ///
-    /// [`add_announce`]: TorrentFactory::add_announce
+    /// Equivalent to calling [`add_announce_url`](TorrentFactory::add_announce_url)
+    /// repeatedly, but consumes an iterator instead of a single URL.
     #[must_use]
-    pub fn add_announces<I: IntoIterator<Item = Url>>(mut self, announces: I) -> Self {
+    pub fn add_announce_urls<I: IntoIterator<Item = Url>>(mut self, announces: I) -> Self {
         self.get_last_announce_tier().extend(announces);
         self
     }
 
     /// Begins a new announce tier.
     ///
-    /// Subsequent calls to [`Self::add_announce`] / [`Self::add_announces`] will add URLs to this new
+    /// Subsequent calls to [`add_announce_url`](TorrentFactory::add_announce_url) /
+    /// [`add_announce_urls`](TorrentFactory::add_announce_urls) will add URLs to this new
     /// tier rather than the previous one.  If the current tier is already empty this method
     /// is a no-op (empty tiers are not created).
     ///
@@ -257,13 +253,11 @@ impl<T> TorrentFactory<T> {
     /// # use url::Url; use bitors::torrent::factory::TorrentFactory;
     /// let factory = TorrentFactory::new()
     ///     // Tier 0 — primary trackers
-    ///     .add_announce(Url::parse("udp://primary.example.com:6969/announce").unwrap())
+    ///     .add_announce_url(Url::parse("udp://primary.example.com:6969/announce").unwrap())
     ///     .next_announce_tier()
     ///     // Tier 1 — backup trackers
-    ///     .add_announce(Url::parse("udp://backup.example.com:6969/announce").unwrap());
+    ///     .add_announce_url(Url::parse("udp://backup.example.com:6969/announce").unwrap());
     /// ```
-    ///
-    /// [`add_announce`]: TorrentFactory::add_announce
     #[must_use]
     pub fn next_announce_tier(mut self) -> Self {
         if !self.get_last_announce_tier().is_empty() {
@@ -276,8 +270,6 @@ impl<T> TorrentFactory<T> {
     ///
     /// Web seeds let clients fall back to HTTP/HTTPS downloads when peers are unavailable.
     /// Each URL should point directly to the content described by the torrent.
-    ///
-    /// [`next_announce_tier`]: TorrentFactory::next_announce_tier
     ///
     /// [BEP 19]: https://www.bittorrent.org/beps/bep_0019.html
     #[must_use]
@@ -305,6 +297,51 @@ impl<T> TorrentFactory<T> {
         }
         self.announce_list.last_mut().unwrap()
     }
+
+    fn add_path_internal(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
+        let path = path.into();
+
+        match path.metadata()? {
+            m if m.is_file() => self.files.push((path, m.len())),
+            m if m.is_dir() => {
+                let files = WalkDir::new(&path)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_file())
+                    .map(walkdir::DirEntry::into_path)
+                    .map(|p| -> Result<(PathBuf, u64), Error> {
+                        let len = p.metadata()?.len();
+                        Ok((p, len))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                if files.is_empty() {
+                    return Err(Error::NoFiles);
+                }
+
+                self.files.extend(files);
+            }
+            _ => return Err(Error::UnsupportedFileType(path)),
+        }
+
+        Ok(())
+    }
+
+    fn into_state<S>(self) -> TorrentFactory<S> {
+        TorrentFactory {
+            files: self.files,
+            name: self.name,
+            piece_length: self.piece_length,
+            private: self.private,
+            source: self.source,
+            announce_list: self.announce_list,
+            url_list: self.url_list,
+            creation_date: self.creation_date,
+            created_by: self.created_by,
+            comment: self.comment,
+            _state: PhantomData,
+        }
+    }
 }
 
 // ── Empty state ──────────────────────────────────────────────────────────────
@@ -319,8 +356,8 @@ impl TorrentFactory<state::Empty> {
     /// Creates a new, unconfigured factory.
     ///
     /// All fields use their defaults (see the [struct-level documentation](TorrentFactory)
-    /// for the default values).  At least one source file must be provided — via
-    /// [`add_file`](TorrentFactory::add_file) or [`add_files`](TorrentFactory::add_files) —
+    /// for the default values).  At least one source path must be provided — via
+    /// [`add_path`](TorrentFactory::add_path) or [`add_paths`](TorrentFactory::add_paths) —
     /// before [`build`](TorrentFactory::build) can be called.
     #[must_use]
     pub fn new() -> Self {
@@ -339,267 +376,170 @@ impl TorrentFactory<state::Empty> {
         }
     }
 
-    /// Transitions the factory to [`state::HasFiles`] by supplying a single source file.
+    /// Adds a single file or directory, transitioning the factory to [`state::HasFiles`].
+    ///
+    /// If `path` points to a directory it is walked recursively; all regular files found
+    /// are added.  The factory transitions to [`state::HasFiles`] on success, enabling
+    /// [`build`](TorrentFactory::build) to be called.
+    ///
+    /// Files are not sorted here; sorting happens inside [`build`](TorrentFactory::build)
+    /// to guarantee deterministic piece hashes regardless of the order in which paths
+    /// were supplied.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotAFile`] if `file` does not exist or is not a regular file
-    /// (e.g. it is a directory or a symlink to a directory).
-    pub fn add_file(
-        self,
-        file: impl Into<PathBuf>,
-    ) -> Result<TorrentFactory<state::HasFiles>, Error> {
-        let file = file.into();
+    /// Returns [`Error::NoFiles`] if `path` is a directory that contains no regular files.
+    /// Returns [`Error::UnsupportedFileType`] if `path` is neither a file nor a directory
+    /// (e.g. a socket or a broken symlink).
+    /// Returns [`Error::Io`] on any I/O failure (including permission errors).
+    pub fn add_path(mut self, path: impl Into<PathBuf>) -> Result<TorrentFactory<HasFiles>, Error> {
+        self.add_path_internal(path)?;
 
-        if !file.is_file() {
-            return Err(Error::NotAFile(file));
-        }
-
-        Ok(TorrentFactory {
-            files: vec![file],
-            name: self.name,
-            piece_length: self.piece_length,
-            private: self.private,
-            source: self.source,
-            announce_list: self.announce_list,
-            url_list: self.url_list,
-            creation_date: self.creation_date,
-            created_by: self.created_by,
-            comment: self.comment,
-            _state: PhantomData,
-        })
+        Ok(self.into_state())
     }
 
-    /// Transitions the factory to [`state::HasFiles`] by supplying multiple source files.
+    /// Adds multiple files and/or directories, transitioning the factory to [`state::HasFiles`].
+    ///
+    /// Each element of `paths` is processed by the same rules as
+    /// [`add_path`](TorrentFactory::add_path): files are added directly, directories are
+    /// walked recursively.  Empty directories within the iterator are silently skipped;
+    /// the iterator as a whole must resolve to at least one regular file for the transition
+    /// to [`state::HasFiles`] to succeed.
     ///
     /// # Errors
     ///
-    /// - [`Error::NoFiles`] — `files` is empty.
-    /// - [`Error::NotAFile`] — any path in `files` is not a regular file.
-    pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(
-        self,
-        files: I,
-    ) -> Result<TorrentFactory<state::HasFiles>, Error> {
-        let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
-
-        if files.is_empty() {
-            return Err(Error::NoFiles);
+    /// Returns [`Error::NoFiles`] if no regular files were found across all supplied paths.
+    /// Returns [`Error::UnsupportedFileType`] if any path is neither a file nor a directory.
+    /// Returns [`Error::Io`] on any I/O failure.
+    pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(
+        mut self,
+        paths: I,
+    ) -> Result<TorrentFactory<HasFiles>, Error> {
+        for path in paths {
+            match self.add_path_internal(path) {
+                Err(Error::NoFiles) | Ok(()) => (),
+                Err(e) => return Err(e),
+            }
         }
 
-        if let Some(p) = files.iter().find(|p| !p.is_file()) {
-            return Err(Error::NotAFile(p.clone()));
+        if self.files.is_empty() {
+            Err(Error::NoFiles)
+        } else {
+            Ok(self.into_state())
         }
-
-        Ok(TorrentFactory {
-            files,
-            name: self.name,
-            piece_length: self.piece_length,
-            private: self.private,
-            source: self.source,
-            announce_list: self.announce_list,
-            url_list: self.url_list,
-            creation_date: self.creation_date,
-            created_by: self.created_by,
-            comment: self.comment,
-            _state: PhantomData,
-        })
     }
 }
 
 // ── HasFiles state ───────────────────────────────────────────────────────────
 
 impl TorrentFactory<state::HasFiles> {
-    /// Creates a factory pre-loaded with a single source file.
+    /// Creates a factory pre-loaded with a single file or directory.
     ///
-    /// Shorthand for `TorrentFactory::new().add_file(file)`.
+    /// Convenience shorthand for `TorrentFactory::new().add_path(path)`.
+    /// If `path` is a directory it is walked recursively.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotAFile`] if `file` does not exist or is not a regular file.
-    pub fn from_file(file: impl Into<PathBuf>) -> Result<Self, Error> {
-        TorrentFactory::new().add_file(file)
+    /// Returns the same errors as [`TorrentFactory::add_path`].
+    pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, Error> {
+        TorrentFactory::new().add_path(path)
     }
 
-    /// Creates a factory pre-loaded with multiple source files.
+    /// Creates a factory pre-loaded with multiple files and/or directories.
     ///
-    /// Shorthand for `TorrentFactory::new().add_files(files)`.
+    /// Convenience shorthand for `TorrentFactory::new().add_paths(paths)`.
     ///
     /// # Errors
     ///
-    /// - [`Error::NoFiles`] — `files` is empty.
-    /// - [`Error::NotAFile`] — any path in `files` is not a regular file.
-    pub fn from_files<I: IntoIterator<Item = impl Into<PathBuf>>>(files: I) -> Result<Self, Error> {
-        TorrentFactory::new().add_files(files)
+    /// Returns the same errors as [`TorrentFactory::add_paths`].
+    pub fn from_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(paths: I) -> Result<Self, Error> {
+        TorrentFactory::new().add_paths(paths)
     }
 
-    /// Creates a factory pre-loaded with every file found (recursively) inside `dir`.
+    /// Adds a single file or directory to an already-populated factory.
     ///
-    /// The directory name is automatically used as the torrent name (overridable with
-    /// [`name`](TorrentFactory::name)).  Files are sorted lexicographically so that the
-    /// piece hashes are reproducible across runs.
+    /// Unlike [`TorrentFactory::<state::Empty>::add_path`], this method returns `Self`
+    /// rather than transitioning state (the factory is already in [`state::HasFiles`]).
+    /// Empty directories are silently ignored rather than returning [`Error::NoFiles`],
+    /// since the factory already holds at least one file.
     ///
     /// # Errors
     ///
-    /// - [`Error::NotADir`] — `dir` does not exist or is not a directory.
-    /// - [`Error::EmptyDir`] — `dir` contains no regular files (after recursion).
-    /// - [`Error::InvalidPath`] — `dir` has no final component (e.g. `/`).
-    /// - [`Error::NonUtf8Name`] — the directory name is not valid UTF-8.
-    pub fn from_directory(dir: impl Into<PathBuf>) -> Result<Self, Error> {
-        let dir = dir.into();
-
-        if !dir.is_dir() {
-            return Err(Error::NotADir(dir));
-        }
-
-        let name = dir
-            .file_name()
-            .ok_or(Error::InvalidPath)?
-            .to_str()
-            .ok_or(Error::NonUtf8Name)?
-            .to_owned();
-
-        let mut files = WalkDir::new(&dir)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-            .map(walkdir::DirEntry::into_path)
-            .collect::<Vec<_>>();
-        files.sort();
-
-        if files.is_empty() {
-            Err(Error::EmptyDir)
-        } else {
-            Ok(Self {
-                files,
-                name: Some(name),
-                piece_length: None,
-                private: false,
-                source: None,
-                announce_list: vec![],
-                url_list: vec![],
-                creation_date: None,
-                created_by: None,
-                comment: None,
-                _state: PhantomData,
-            })
+    /// Returns [`Error::UnsupportedFileType`] if `path` is neither a file nor a directory.
+    /// Returns [`Error::Io`] on any I/O failure.
+    pub fn add_path(mut self, path: impl Into<PathBuf>) -> Result<Self, Error> {
+        match self.add_path_internal(path) {
+            Err(Error::NoFiles) | Ok(()) => Ok(self),
+            Err(e) => Err(e),
         }
     }
 
-    /// Adds a single source file to an already-populated factory.
+    /// Adds multiple files and/or directories to an already-populated factory.
+    ///
+    /// Each element is processed by the same rules as
+    /// [`add_path`](TorrentFactory::<state::HasFiles>::add_path). Empty directories
+    /// are silently skipped.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotAFile`] if `file` does not exist or is not a regular file.
-    pub fn add_file(mut self, file: impl Into<PathBuf>) -> Result<Self, Error> {
-        let file = file.into();
-
-        if !file.is_file() {
-            return Err(Error::NotAFile(file));
-        }
-
-        self.files.push(file);
-        Ok(self)
-    }
-
-    /// Adds multiple source files to an already-populated factory.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::NotAFile`] if any path in `files` is not a regular file.
-    /// An empty iterator is accepted without error (the existing file list is unchanged).
-    pub fn add_files<I: IntoIterator<Item = impl Into<PathBuf>>>(
+    /// Returns [`Error::UnsupportedFileType`] if any path is neither a file nor a directory.
+    /// Returns [`Error::Io`] on any I/O failure.
+    pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(
         mut self,
-        files: I,
+        paths: I,
     ) -> Result<Self, Error> {
-        let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
-
-        if let Some(p) = files.iter().find(|p| !p.is_file()) {
-            return Err(Error::NotAFile(p.clone()));
+        for path in paths {
+            match self.add_path_internal(path) {
+                Err(Error::NoFiles) | Ok(()) => (),
+                Err(e) => return Err(e),
+            }
         }
 
-        self.files.extend(files);
         Ok(self)
     }
 
-    /// Consumes the factory and produces a serializable [`TorrentBuf`].
+    /// Reads all source files, computes piece hashes, and assembles the final [`TorrentBuf`].
     ///
-    /// This method performs all I/O: it reads every source file in order, computes SHA-1
-    /// piece hashes, and gathers filesystem metadata (file sizes).  The resulting
-    /// [`TorrentBuf`] can be serialized to a `.torrent` file with the encoding layer of
-    /// your choice.
+    /// The following steps happen in order:
     ///
-    /// # File mode
-    ///
-    /// | Source files | Torrent mode |
-    /// |---|---|
-    /// | Exactly one | Single-file (`length` key in `info`) |
-    /// | More than one | Multi-file (`files` list in `info`) |
-    ///
-    /// # Announce list
-    ///
-    /// The first URL of the first non-empty tier becomes the top-level `announce` field for
-    /// backward compatibility with clients that do not support `announce-list`.
+    /// 1. Source files are sorted lexicographically by path so that piece hashes are
+    ///    reproducible across runs regardless of the order files were added.
+    /// 2. The longest common path prefix is stripped from all paths to produce relative
+    ///    `path` components for the `info.files` list.
+    /// 3. If no `name` was set explicitly: single-file torrents use the filename;
+    ///    multi-file torrents use the last component of the common prefix, or
+    ///    `"New Torrent"` if no common prefix exists.
+    /// 4. File contents are read sequentially and hashed into SHA-1 pieces of
+    ///    `piece_length` bytes.  A piece may span the boundary between two files.
+    /// 5. The `TorrentBuf` is assembled and returned.
     ///
     /// # Errors
     ///
-    /// - [`Error::Io`] — any file could not be opened or read, or metadata could not be
-    ///   queried.
-    /// - [`Error::NonUtf8Name`] — a source file's path contains a non-UTF-8 component.
-    /// - [`Error::PieceLengthTooLarge`] — the piece length overflows `usize` (only possible
-    ///   on 32-bit targets).
-    pub fn build(self) -> Result<TorrentBuf, Error> {
-        let piece_length = self.piece_length.unwrap_or(
+    /// Returns [`Error::Io`] if any file cannot be opened or read.
+    /// Returns [`Error::NonUtf8Name`] if any path component is not valid UTF-8.
+    /// Returns [`Error::PieceLengthTooLarge`] if the piece length exceeds `usize::MAX`
+    /// (can only occur on 32-bit targets).
+    pub fn build(mut self) -> Result<TorrentBuf, Error> {
+        let piece_length = self.piece_length.unwrap_or_else(
             #[expect(clippy::missing_panics_doc, reason = "infallible")]
-            NonZeroU64::new(512 * 1024).unwrap(),
+            || NonZeroU64::new(512 * 1024).unwrap(),
         );
 
-        let creation_date = self.creation_date.unwrap_or(
+        let creation_date = self.creation_date.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(0),
-        );
+                .unwrap_or(0)
+        });
 
-        let file_path_comps = Self::remove_common_prefix(&self.files)
-            .iter()
-            .map(|p| -> Result<Vec<String>, Error> {
-                p.components()
-                    .map(|c| {
-                        Ok(c.as_os_str()
-                            .to_str()
-                            .ok_or(Error::NonUtf8Name)?
-                            .to_string())
-                    })
-                    .collect()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        self.files.sort();
 
-        let file_infos = self
-            .files
-            .iter()
-            .zip(file_path_comps)
-            .map(|(path, comps)| -> Result<FileInfo, Error> {
-                Ok(FileInfo {
-                    length: std::fs::metadata(path)?.len(),
-                    md5sum: None,
-                    path: comps.into_iter().map(Cow::Owned).collect(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let (common_prefix, files_no_prefix) = Self::remove_common_prefix(&self.files);
 
-        let pieces = Self::compute_piece_hashes(self.files, piece_length_usize(piece_length)?)?;
+        let mut file_infos = vec![];
+        Self::build_file_infos(&self.files, &files_no_prefix, &mut file_infos)?;
 
-        let name = match self.name {
-            Some(name) => name,
-            #[expect(clippy::missing_panics_doc, reason = "infallible")]
-            None => file_infos[0]
-                .full_path()
-                .file_name()
-                .expect("The file name should be correct since the file has already been processed")
-                .to_str()
-                .expect("Should not fail since UTF-8 validity has already been checked earlier")
-                .to_string(),
-        };
+        let pieces = Self::compute_piece_hashes(&self.files, piece_length_usize(piece_length)?)?;
 
         let file_mode = match file_infos.len() {
             0 => unreachable!("TorrentFactory<HasFiles> does not allow an empty file vector"),
@@ -608,6 +548,29 @@ impl TorrentFactory<state::HasFiles> {
                 md5sum: None,
             },
             _ => FileMode::Multi { files: file_infos },
+        };
+
+        let name = match (self.name, &file_mode) {
+            (Some(name), _) => name,
+            (None, FileMode::Single { .. }) => common_prefix
+                .components()
+                .next_back()
+                .and_then(|c| c.as_os_str().to_str())
+                .ok_or(Error::NonUtf8Name)?
+                .to_string(),
+            (None, FileMode::Multi { .. }) => {
+                if !clean(&common_prefix).starts_with("..")
+                    && let Ok(absolute_prefix) = common_prefix.canonicalize()
+                    && let Some(last) = absolute_prefix.components().next_back()
+                {
+                    last.as_os_str()
+                        .to_str()
+                        .ok_or(Error::NonUtf8Name)?
+                        .to_string()
+                } else {
+                    "New Torrent".to_string()
+                }
+            }
         };
 
         let info = Info {
@@ -650,8 +613,44 @@ impl TorrentFactory<state::HasFiles> {
             creation_date: Some(creation_date),
             comment: self.comment.map(Cow::Owned),
             created_by: self.created_by.map(Cow::Owned),
-            encoding: Some(Cow::Owned("UTF-8".to_string())),
+            encoding: Some(Cow::Borrowed("UTF-8")),
         })
+    }
+
+    fn build_file_infos(
+        files: &[(PathBuf, u64)],
+        files_no_prefix: &[PathBuf],
+        file_infos: &mut Vec<FileInfo<'_>>,
+    ) -> Result<(), Error> {
+        let file_path_comps = files_no_prefix
+            .iter()
+            .map(|p| -> Result<Vec<String>, Error> {
+                p.components()
+                    .map(|c| {
+                        Ok(c.as_os_str()
+                            .to_str()
+                            .ok_or(Error::NonUtf8Name)?
+                            .to_string())
+                    })
+                    .collect()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let res = files
+            .iter()
+            .zip(file_path_comps)
+            .map(|((_, length), comps)| -> Result<FileInfo, Error> {
+                Ok(FileInfo {
+                    length: *length,
+                    md5sum: None,
+                    path: comps.into_iter().map(Cow::Owned).collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        file_infos.extend(res);
+
+        Ok(())
     }
 
     /// Reads all source files sequentially and produces a flat list of SHA-1 piece hashes.
@@ -663,15 +662,16 @@ impl TorrentFactory<state::HasFiles> {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if any file cannot be opened or read.
-    fn compute_piece_hashes<I: IntoIterator<Item = PathBuf>>(
-        paths: I,
+    fn compute_piece_hashes(
+        paths: &[(PathBuf, u64)],
         piece_length: usize,
     ) -> Result<Vec<[u8; 20]>, Error> {
+        let mut sha1 = Sha1::new();
         let mut hashes = vec![];
         let mut chunk = vec![0u8; piece_length];
         let mut iter = paths
-            .into_iter()
-            .map(|p| File::open(p).map(|f| BufReader::with_capacity(piece_length, f)));
+            .iter()
+            .map(|(p, _)| File::open(p).map(|f| BufReader::with_capacity(piece_length, f)));
         let mut reader = iter
             .next()
             .expect("TorrentFactory<HasFiles> guarantees at least one file")?;
@@ -699,7 +699,8 @@ impl TorrentFactory<state::HasFiles> {
                 break;
             }
 
-            hashes.push(Sha1::digest(&chunk[..total]).into());
+            sha1.update(&chunk[..total]);
+            hashes.push(sha1.finalize_reset().into());
         }
 
         Ok(hashes)
@@ -716,12 +717,12 @@ impl TorrentFactory<state::HasFiles> {
     /// # Panics
     ///
     /// Panics in debug builds if `paths` is empty.
-    fn remove_common_prefix(paths: &[PathBuf]) -> Vec<PathBuf> {
+    fn remove_common_prefix(paths: &[(PathBuf, u64)]) -> (PathBuf, Vec<PathBuf>) {
         debug_assert!(!paths.is_empty());
 
-        let mut prefix = paths[0].clone();
+        let mut prefix = paths[0].0.clone();
 
-        for s in &paths[1..] {
+        for (s, _) in &paths[1..] {
             while !s.starts_with(&prefix) {
                 if prefix.parent().is_none() {
                     break;
@@ -730,10 +731,16 @@ impl TorrentFactory<state::HasFiles> {
             }
         }
 
-        paths
+        let paths_no_prefix = paths
             .iter()
-            .map(|s| s.strip_prefix(&prefix).unwrap_or(s).to_owned())
-            .collect()
+            .map(|(p, _)| clean(p.strip_prefix(&prefix).unwrap_or(p)))
+            .collect();
+
+        if prefix.as_os_str().is_empty() {
+            (prefix, paths_no_prefix)
+        } else {
+            (clean(prefix), paths_no_prefix)
+        }
     }
 }
 
@@ -744,18 +751,14 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// [`TorrentFactory::add_files`] was called with an empty iterator.
+    /// No regular files were found across all supplied paths.
+    ///
+    /// This error is returned by [`TorrentFactory::add_paths`] when none of the
+    /// supplied paths resolve to a regular file (e.g. all paths are empty
+    /// directories), and by [`TorrentFactory::add_path`] (in the [`state::Empty`]
+    /// state) when the supplied path is a directory that contains no regular files.
     #[error("No files were provided to the factory")]
     NoFiles,
-
-    /// [`TorrentFactory::from_directory`] was called on a directory that contains no
-    /// regular files (after recursing into subdirectories).
-    #[error("An empty directory was provided to the factory")]
-    EmptyDir,
-
-    /// A path has no final component and therefore no usable file name (e.g. the root `/`).
-    #[error("Path has no file name component")]
-    InvalidPath,
 
     /// A file or directory name cannot be represented as UTF-8.
     ///
@@ -764,16 +767,16 @@ pub enum Error {
     #[error("File/directory name is not valid UTF-8")]
     NonUtf8Name,
 
-    /// A path that was expected to point to a regular file does not.
-    #[error("The provided path does not correspond to a file: {0}")]
-    NotAFile(PathBuf),
-
-    /// A path that was expected to point to a directory does not.
-    #[error("The provided path does not correspond to a directory: {0}")]
-    NotADir(PathBuf),
+    /// The path is neither a regular file nor a directory.
+    ///
+    /// Returned when a supplied path exists on the filesystem but has an unsupported
+    /// type, such as a Unix socket, named pipe (FIFO), device node, or a broken
+    /// symlink.  Only regular files and directories are accepted as source paths.
+    #[error("Unsupported file type: {0}")]
+    UnsupportedFileType(PathBuf),
 
     /// The requested piece length does not fit in `usize` and cannot be used as a buffer
-    /// size on this platform.  This can only occur on 32-bit targets.
+    /// size on this platform. This can only occur on 32-bit targets.
     #[error("The provided piece length is too large (does not fit in usize): {0}")]
     PieceLengthTooLarge(NonZeroU64),
 }

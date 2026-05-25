@@ -81,8 +81,8 @@ use bitors::{bencode::Bencode, torrent::factory::TorrentFactory};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let torrent = TorrentFactory::new()
         .piece_length(NonZeroU64::new(512 * 1024).unwrap())
-        .add_announce("udp://tracker.opentrackr.org:1337/announce".parse()?)
-        .add_file("path/to/file.iso")?
+        .add_announce_url("udp://tracker.opentrackr.org:1337/announce".parse()?)
+        .add_path("path/to/file.iso")?
         .build()?;
 
     let mut out = std::fs::File::create("file.torrent")?;
@@ -100,11 +100,14 @@ call `.build()` before supplying any files.
 
 ### Creating a `.torrent` from a directory
 
+`TorrentFactory::from_path` accepts both files and directories — directories are
+walked recursively:
+
 ```rust
 use bitors::torrent::factory::TorrentFactory;
 
-let torrent = TorrentFactory::from_directory("path/to/my-album/")?
-    .add_announce("udp://tracker.opentrackr.org:1337/announce".parse()?)
+let torrent = TorrentFactory::from_path("path/to/my-album/")?
+    .add_announce_url("udp://tracker.opentrackr.org:1337/announce".parse()?)
     .private()
     .build()?;
 ```
@@ -186,11 +189,11 @@ use bitors::torrent::factory::TorrentFactory;
 
 let factory = TorrentFactory::new()
     // Tier 0 — primary trackers (tried first, in random order)
-    .add_announce("udp://tracker.opentrackr.org:1337/announce".parse()?)
-    .add_announce("udp://tracker.torrent.eu.org:451/announce".parse()?)
+    .add_announce_url("udp://tracker.opentrackr.org:1337/announce".parse()?)
+    .add_announce_url("udp://tracker.torrent.eu.org:451/announce".parse()?)
     .next_announce_tier()
     // Tier 1 — fallback trackers
-    .add_announce("udp://open.stealth.si:80/announce".parse()?);
+    .add_announce_url("udp://open.stealth.si:80/announce".parse()?);
 ```
 
 The first URL of the first tier is also written to the top-level `announce` key
@@ -209,9 +212,9 @@ expose builder methods for populating this list:
 ```rust
 use bitors::torrent::factory::TorrentFactory;
 
-let torrent = TorrentFactory::from_file("file.iso")?
+let torrent = TorrentFactory::from_path("file.iso")?
     .add_url("https://mirror.example.com/file.iso".parse()?)
-    .add_announce("udp://tracker.example.com:6969/announce".parse()?)
+    .add_announce_url("udp://tracker.example.com:6969/announce".parse()?)
     .build()?;
 ```
 

@@ -12,6 +12,7 @@ keywords = ["bittorrent", "torrent", "bencode", "metainfo", "p2p"]
 [dependencies]
 data-encoding = "2.11.0"
 digest-io = "0.1.0"
+path-clean = "1.0.1"
 percent-encoding = "2.3.2"
 sha1 = "0.11.0"
 thiserror = "2.0.18"
