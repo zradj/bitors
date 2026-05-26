@@ -185,7 +185,7 @@ impl MagnetLink {
         write!(w, "magnet:?xt=urn:btih:{hash_enc}")?;
 
         if let Some(info_hash_v2) = &self.info_hash_v2 {
-            let mut buf = [0u8, 64];
+            let mut buf = [0u8; 64];
             HEXLOWER.encode_mut(info_hash_v2, &mut buf);
             unsafe {
                 write!(w, "&xt=urn:btmh:{}", std::str::from_utf8_unchecked(&buf))?;
