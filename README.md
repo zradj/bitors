@@ -21,7 +21,7 @@ Add `bitors` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bitors = "3.0.1"
+bitors = "3.1.0"
 ```
 
 ---
@@ -159,6 +159,15 @@ let hash = torrent.info_hash();
 println!("{}", hash.map(|b| format!("{b:02x}")).join(""));
 ```
 
+For the SHA-256 counterpart used in [BEP 52] hybrid torrents, use `info_hash_v2()`:
+
+```rust
+let hash_v2 = torrent.info_hash_v2();
+println!("{}", hash_v2.map(|b| format!("{b:02x}")).join(""));
+```
+
+[BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
+
 ---
 
 ## Zero-copy design and lifetimes
@@ -261,6 +270,39 @@ let link = MagnetLink {
 
 println!("{link}");
 ```
+
+---
+
+## Hybrid magnet links (BEP 52)
+
+`Torrent::magnet_link_v2()` produces a hybrid v1/v2 magnet URI that includes both
+the SHA-1 `xt=urn:btih` parameter and a SHA-256 `xt=urn:btmh` parameter:
+
+```rust
+use bitors::parse_torrent;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("ubuntu.torrent")?;
+    let torrent = parse_torrent(&bytes)?;
+
+    // Standard v1-only magnet link
+    println!("{}", torrent.magnet_link());
+    // magnet:?xt=urn:btih:<40 hex chars>&dn=...
+
+    // Hybrid v1/v2 magnet link
+    println!("{}", torrent.magnet_link_v2());
+    // magnet:?xt=urn:btih:<40 hex chars>&xt=urn:btmh:<64 hex chars>&dn=...
+
+    Ok(())
+}
+```
+
+The SHA-256 digest is computed over the same Bencoded `info` dictionary as the SHA-1
+hash, and is also available directly as `Torrent::info_hash_v2()` and
+`Info::info_hash_v2()`.  You can construct a `MagnetLink` with the v2 hash by hand
+via `MagnetLink::from_torrent_v2(&torrent)`.
+
+[BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
 
 ---
 

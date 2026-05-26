@@ -59,10 +59,16 @@
 use std::fmt::{self, Write};
 
 use data_encoding::{BASE32, HEXLOWER};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use url::Url;
 
 use crate::torrent::Torrent;
+
+const URI_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// A magnet link for a BitTorrent torrent.
 ///
@@ -89,6 +95,15 @@ use crate::torrent::Torrent;
 pub struct MagnetLink {
     /// The 20-byte SHA-1 info hash that uniquely identifies the torrent's content.
     pub info_hash: [u8; 20],
+    /// An optional 32-byte SHA-256 digest of the `info` dictionary ([BEP 52]).
+    ///
+    /// When set, this hash is appended to the URI as an additional
+    /// `&xt=urn:btmh:<64 hex chars>` parameter alongside the standard SHA-1
+    /// `xt=urn:btih` parameter, producing a hybrid v1/v2 magnet link.  `None`
+    /// produces a v1-only URI.
+    ///
+    /// [BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
+    pub info_hash_v2: Option<[u8; 32]>,
     /// An optional human-readable display name (`dn` parameter).
     ///
     /// When present this is percent-encoded and appended to the URI as `&dn=<name>`.
@@ -107,6 +122,37 @@ pub struct MagnetLink {
 }
 
 impl MagnetLink {
+    /// Creates a [`MagnetLink`] from a [`Torrent`], including the SHA-256 info hash.
+    ///
+    /// Identical to [`From<&Torrent>`] except that the SHA-256 digest of the `info`
+    /// dictionary is also populated in [`info_hash_v2`](Self::info_hash_v2).  The
+    /// resulting URI includes both `xt=urn:btih` (SHA-1) and `xt=urn:btmh` (SHA-256)
+    /// parameters, producing a hybrid BitTorrent v1/v2 magnet link as described in
+    /// [BEP 52].
+    ///
+    /// Use [`Torrent::magnet_link_v2`](crate::torrent::Torrent::magnet_link_v2) for
+    /// the same operation via a method on `Torrent`.
+    ///
+    /// [BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bitors::{parse_torrent, magnet::MagnetLink};
+    ///
+    /// let bytes = std::fs::read("ubuntu.torrent")?;
+    /// let torrent = parse_torrent(&bytes)?;
+    ///
+    /// let link = MagnetLink::from_torrent_v2(&torrent);
+    /// println!("{link}");   // magnet:?xt=urn:btih:<sha1>&xt=urn:btmh:<sha256>&dn=...
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn from_torrent_v2(torrent: &Torrent) -> Self {
+        let mut res = Self::from(torrent);
+        res.info_hash_v2 = Some(torrent.info_hash_v2());
+        res
+    }
     /// Returns the magnet URI with the info hash encoded as 40 lowercase hex characters.
     ///
     /// This is equivalent to calling `self.to_string()` and is the most widely
@@ -125,8 +171,12 @@ impl MagnetLink {
     #[must_use]
     pub fn to_uri_base32(&self) -> String {
         let mut res = String::with_capacity(128);
+        let mut buf = [0u8; 32];
+        BASE32.encode_mut(&self.info_hash, &mut buf);
 
-        let _ = self.write_link(&mut res, &BASE32.encode(&self.info_hash));
+        unsafe {
+            let _ = self.write_link(&mut res, std::str::from_utf8_unchecked(&buf));
+        };
 
         res
     }
@@ -134,8 +184,16 @@ impl MagnetLink {
     fn write_link(&self, w: &mut impl Write, hash_enc: &str) -> fmt::Result {
         write!(w, "magnet:?xt=urn:btih:{hash_enc}")?;
 
+        if let Some(info_hash_v2) = &self.info_hash_v2 {
+            let mut buf = [0u8, 64];
+            HEXLOWER.encode_mut(info_hash_v2, &mut buf);
+            unsafe {
+                write!(w, "&xt=urn:btmh:{}", std::str::from_utf8_unchecked(&buf))?;
+            }
+        }
+
         if let Some(name) = &self.name {
-            let encoded = utf8_percent_encode(name, NON_ALPHANUMERIC);
+            let encoded = utf8_percent_encode(name, URI_SET);
             write!(w, "&dn={encoded}")?;
         }
 
@@ -144,7 +202,7 @@ impl MagnetLink {
         }
 
         for tracker in &self.trackers {
-            let encoded = utf8_percent_encode(tracker.as_str(), NON_ALPHANUMERIC);
+            let encoded = utf8_percent_encode(tracker.as_str(), URI_SET);
             write!(w, "&tr={encoded}")?;
         }
 
@@ -158,6 +216,7 @@ impl From<&Torrent<'_>> for MagnetLink {
 
         Self {
             info_hash: torrent.info_hash(),
+            info_hash_v2: None,
             name: Some(torrent.info.name.to_string()),
             trackers,
             size: Some(torrent.total_size()),
@@ -167,7 +226,10 @@ impl From<&Torrent<'_>> for MagnetLink {
 
 impl fmt::Display for MagnetLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write_link(f, &HEXLOWER.encode(&self.info_hash))?;
+        let mut buf = [0u8; 40];
+        HEXLOWER.encode_mut(&self.info_hash, &mut buf);
+
+        unsafe { self.write_link(f, std::str::from_utf8_unchecked(&buf))? };
 
         Ok(())
     }

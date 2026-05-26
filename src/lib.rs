@@ -141,6 +141,20 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! For a hybrid v1/v2 URI that includes both the SHA-1 and SHA-256 info hashes, use
+//! [`Torrent::magnet_link_v2`](torrent::Torrent::magnet_link_v2) instead:
+//!
+//! ```no_run
+//! use bitors::parse_torrent;
+//!
+//! let bytes = std::fs::read("ubuntu.torrent")?;
+//! let torrent = parse_torrent(&bytes)?;
+//!
+//! println!("{}", torrent.magnet_link_v2());
+//! // magnet:?xt=urn:btih:<sha1>&xt=urn:btmh:<sha256>&dn=…
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! You can also build a [`magnet::MagnetLink`] by hand when you only have an info
 //! hash and want to attach a custom tracker list.  See the [`magnet`] module docs
 //! for details.
@@ -169,6 +183,13 @@
 //! dictionary — the canonical identifier exchanged with trackers and embedded in magnet
 //! links.  The same computation is also available directly on [`torrent::Info`] via
 //! [`torrent::Info::info_hash`].
+//!
+//! [`torrent::Torrent::info_hash_v2`] returns the equivalent 32-byte SHA-256 digest used
+//! in hybrid v1/v2 magnet links ([BEP 52]).  Pass it to
+//! [`Torrent::magnet_link_v2`](torrent::Torrent::magnet_link_v2) to embed both hashes in
+//! a single URI.
+//!
+//! [BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
 //!
 //! ```no_run
 //! use bitors::parse_torrent;

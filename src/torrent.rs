@@ -75,6 +75,7 @@ pub mod factory;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU64, path::PathBuf};
 
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
 
@@ -120,7 +121,7 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
     fn opt(&mut self, key: &[u8]) -> Option<Bencode<'a>> {
         self.remove(key)
     }
-    
+
     fn require(&mut self, key: &[u8]) -> Result<Bencode<'a>, Error> {
         self.opt(key).ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
@@ -222,6 +223,20 @@ impl Torrent<'_> {
         self.info.info_hash()
     }
 
+    /// Computes the 32-byte SHA-256 digest of the Bencoded `info` dictionary.
+    ///
+    /// This is the v2 counterpart to [`info_hash`](Self::info_hash): where v1 uses SHA-1,
+    /// this method uses SHA-256 as described in [BEP 52].  Use it when generating hybrid
+    /// v1/v2 magnet links via [`magnet_link_v2`](Self::magnet_link_v2).
+    ///
+    /// This is a convenience wrapper around [`Info::info_hash_v2`].
+    ///
+    /// [BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
+    #[must_use]
+    pub fn info_hash_v2(&self) -> [u8; 32] {
+        self.info.info_hash_v2()
+    }
+
     /// Returns the total size of all content in this torrent, in bytes.
     ///
     /// For single-file torrents this is the length of that file.  For multi-file torrents
@@ -266,7 +281,33 @@ impl Torrent<'_> {
     /// ```
     #[must_use]
     pub fn magnet_link(&self) -> MagnetLink {
-        self.into()
+        MagnetLink::from(self)
+    }
+
+    /// Generates a hybrid [`MagnetLink`] containing both the SHA-1 and SHA-256 info hashes.
+    ///
+    /// Identical to [`magnet_link`](Self::magnet_link) except that the resulting URI also
+    /// carries a `xt=urn:btmh:<64 hex chars>` parameter alongside the standard
+    /// `xt=urn:btih` parameter, forming a hybrid v1/v2 magnet link as described in
+    /// [BEP 52].
+    ///
+    /// [BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use bitors::parse_torrent;
+    ///
+    /// let bytes = std::fs::read("ubuntu.torrent")?;
+    /// let torrent = parse_torrent(&bytes)?;
+    ///
+    /// println!("{}", torrent.magnet_link_v2());
+    /// // magnet:?xt=urn:btih:<sha1>&xt=urn:btmh:<sha256>&dn=...
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn magnet_link_v2(&self) -> MagnetLink {
+        MagnetLink::from_torrent_v2(self)
     }
 
     /// Converts the `Torrent` struct back into a `Bencode` representation.
@@ -411,6 +452,23 @@ impl Info<'_> {
     #[must_use]
     pub fn info_hash(&self) -> [u8; 20] {
         let mut hasher = digest_io::IoWrapper(Sha1::new());
+        #[expect(clippy::missing_panics_doc, reason = "infallible")]
+        self.to_bencode()
+            .encode_to_writer(&mut hasher)
+            .expect("Writing to hasher should not fail");
+        hasher.0.finalize().into()
+    }
+
+    /// Computes the 32-byte SHA-256 digest of the Bencoded `info` dictionary.
+    ///
+    /// This is the v2 counterpart to [`info_hash`](Self::info_hash).  The resulting digest
+    /// can be embedded in a magnet URI as an `xt=urn:btmh` parameter via
+    /// [`Torrent::magnet_link_v2`](crate::torrent::Torrent::magnet_link_v2).
+    ///
+    /// [BEP 52]: https://www.bittorrent.org/beps/bep_0052.html
+    #[must_use]
+    pub fn info_hash_v2(&self) -> [u8; 32] {
+        let mut hasher = digest_io::IoWrapper(Sha256::new());
         #[expect(clippy::missing_panics_doc, reason = "infallible")]
         self.to_bencode()
             .encode_to_writer(&mut hasher)

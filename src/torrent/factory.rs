@@ -225,8 +225,8 @@ impl<T> TorrentFactory<T> {
     ///
     /// [`next_announce_tier`]: TorrentFactory::next_announce_tier
     #[must_use]
-    pub fn add_announce_url(mut self, announce: Url) -> Self {
-        self.get_last_announce_tier().push(announce);
+    pub fn add_announce_url(mut self, announce_url: Url) -> Self {
+        self.get_last_announce_tier().push(announce_url);
         self
     }
 
@@ -235,8 +235,8 @@ impl<T> TorrentFactory<T> {
     /// Equivalent to calling [`add_announce_url`](TorrentFactory::add_announce_url)
     /// repeatedly, but consumes an iterator instead of a single URL.
     #[must_use]
-    pub fn add_announce_urls<I: IntoIterator<Item = Url>>(mut self, announces: I) -> Self {
-        self.get_last_announce_tier().extend(announces);
+    pub fn add_announce_urls<I: IntoIterator<Item = Url>>(mut self, announce_urls: I) -> Self {
+        self.get_last_announce_tier().extend(announce_urls);
         self
     }
 
