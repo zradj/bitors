@@ -151,7 +151,7 @@
 //! let torrent = parse_torrent(&bytes)?;
 //!
 //! println!("{}", torrent.magnet_link_v2());
-//! // magnet:?xt=urn:btih:<sha1>&xt=urn:btmh:<sha256>&dn=…
+//! // magnet:?xt=urn:btih:<sha1>&xt=urn:btmh:1220<sha256>&dn=…
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!

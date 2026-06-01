@@ -21,7 +21,7 @@ Add `bitors` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bitors = "3.1.1"
+bitors = "3.1.2"
 ```
 
 ---
@@ -291,7 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Hybrid v1/v2 magnet link
     println!("{}", torrent.magnet_link_v2());
-    // magnet:?xt=urn:btih:<40 hex chars>&xt=urn:btmh:<64 hex chars>&dn=...
+    // magnet:?xt=urn:btih:<40 hex chars>&xt=urn:btmh:1220<64 hex chars>&dn=...
 
     Ok(())
 }

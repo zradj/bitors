@@ -287,7 +287,7 @@ impl Torrent<'_> {
     /// Generates a hybrid [`MagnetLink`] containing both the SHA-1 and SHA-256 info hashes.
     ///
     /// Identical to [`magnet_link`](Self::magnet_link) except that the resulting URI also
-    /// carries a `xt=urn:btmh:<64 hex chars>` parameter alongside the standard
+    /// carries a `xt=urn:btmh:1220<64 hex chars>` parameter alongside the standard
     /// `xt=urn:btih` parameter, forming a hybrid v1/v2 magnet link as described in
     /// [BEP 52].
     ///
