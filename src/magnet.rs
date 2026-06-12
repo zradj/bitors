@@ -2,6 +2,7 @@ use std::fmt::{self};
 
 use data_encoding::{BASE32, HEXLOWER};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use thiserror::Error;
 use url::Url;
 
 use crate::torrent::Torrent;
@@ -32,26 +33,53 @@ const URI_SET: &AsciiSet = &NON_ALPHANUMERIC
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct MagnetLink {
     /// The SHA-1 info hash of a v1-only or hybrid torrent. Set to [`None`] if the torrent is v2-only.
-    pub info_hash_v1: Option<[u8; 20]>,
+    info_hash_v1: Option<[u8; 20]>,
     /// The SHA-256 info hash of a v2-only or hybrid torrent. Set to [`None`] if the torrent is v1-only.
-    pub info_hash_v2: Option<[u8; 32]>,
+    info_hash_v2: Option<[u8; 32]>,
     /// The optional name of the torrent.
     pub name: Option<String>,
     /// A flat list of the torrent trackers ([`Torrent::announce_list`]).
     pub trackers: Vec<Url>,
     /// The total size of the torrent.
     pub size: Option<u64>,
-    /// Indicates whether [`MagnetLink::info_hash_v1`] should be encoded as Base32 instead of Hex.
+    /// Indicates whether the v1 info hash should be encoded as Base32 instead of Hex.
     /// Set to `false` by default but can be toggled using the builder method [`MagnetLink::v1_base32`].
     ///
-    /// Note that [`MagnetLink::info_hash_v2`] can only be encoded in Hex.
+    /// Note that the v2 info hash can only be encoded in Hex.
     pub v1_base32: bool,
 }
 
 impl MagnetLink {
-    /// Encode [`MagnetLink::info_hash_v1`] as Base32 instead of Hex.
+    /// Creates a new [`MagnetLink`] with the given hash(es) directly.
+    ///
+    /// It is required to provide at least one hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoHashes`] if no hashes were provided to the constructor.
+    pub fn new(
+        info_hash_v1: Option<[u8; 20]>,
+        info_hash_v2: Option<[u8; 32]>,
+    ) -> Result<Self, Error> {
+        if info_hash_v1.is_none() && info_hash_v2.is_none() {
+            Err(Error::NoHashes)
+        } else {
+            Ok(Self {
+                info_hash_v1,
+                info_hash_v2,
+                name: None,
+                trackers: vec![],
+                size: None,
+                v1_base32: false,
+            })
+        }
+    }
+
+    /// Encode the v1 info hash as Base32 instead of Hex.
     ///
     /// This is the preferred option by some clients.
+    ///
+    /// No-op if the v1 hash is not present in the magnet link.
     ///
     /// # Examples
     ///
@@ -99,13 +127,8 @@ impl fmt::Display for MagnetLink {
     ///
     /// Magnet links for hybrid torrents contain the v1 info hash first, followed by the v2 info hash. The v1-only and
     /// v2-only torrents contain only their respective info hashes in the magnet link.
-    ///
-    /// Either [`MagnetLink::info_hash_v1`] or [`MagnetLink::info_hash_v2`] must be set to produce a valid link.
-    /// This is guaranteed by [`Torrent`] via [`Torrent::magnet_link`] or [`MagnetLink::from`] if the torrent
-    /// was parsed/constructed using this crate's methods.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "magnet:")?;
-        let mut has_query = false;
 
         if let Some(info_hash_v1) = &self.info_hash_v1 {
             let mut buf = if self.v1_base32 {
@@ -117,43 +140,47 @@ impl fmt::Display for MagnetLink {
             encoding.encode_mut(info_hash_v1, &mut buf);
 
             write!(f, "?xt=urn:btih:{}", std::str::from_utf8(&buf).unwrap())?;
-            has_query = true;
         }
 
         if let Some(info_hash_v2) = &self.info_hash_v2 {
             let mut buf = [0u8; 64];
             HEXLOWER.encode_mut(info_hash_v2, &mut buf);
 
-            let prefix = if has_query { '&' } else { '?' };
+            let prefix = if self.info_hash_v1.is_some() {
+                '&'
+            } else {
+                '?'
+            };
             write!(
                 f,
                 "{}xt=urn:btmh:1220{}",
                 prefix,
                 std::str::from_utf8(&buf).unwrap()
             )?;
-            has_query = true;
         }
 
         if let Some(name) = &self.name {
             let encoded = utf8_percent_encode(name, URI_SET);
-            let prefix = if has_query { '&' } else { '?' };
-            write!(f, "{prefix}dn={encoded}")?;
-            has_query = true;
+            write!(f, "&dn={encoded}")?;
         }
 
         if let Some(size) = self.size {
-            let prefix = if has_query { '&' } else { '?' };
-            write!(f, "{prefix}xl={size}")?;
-            has_query = true;
+            write!(f, "&xl={size}")?;
         }
 
         for tracker in &self.trackers {
             let encoded = utf8_percent_encode(tracker.as_str(), URI_SET);
-            let prefix = if has_query { '&' } else { '?' };
-            write!(f, "{prefix}tr={encoded}")?;
-            has_query = true;
+            write!(f, "&tr={encoded}")?;
         }
 
         Ok(())
     }
+}
+
+/// Errors that can arise while working with [`MagnetLink`].
+#[derive(Debug, Error)]
+pub enum Error {
+    /// No hashes were provided to [`MagnetLink::new`].
+    #[error("No hashes were provided to the magnet link")]
+    NoHashes,
 }
