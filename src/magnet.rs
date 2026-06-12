@@ -2,7 +2,6 @@ use std::fmt::{self};
 
 use data_encoding::{BASE32, HEXLOWER};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use thiserror::Error;
 use url::Url;
 
 use crate::torrent::Torrent;
@@ -201,12 +200,4 @@ impl fmt::Display for MagnetLink {
 
         Ok(())
     }
-}
-
-/// Errors that can arise while working with [`MagnetLink`].
-#[derive(Debug, Error)]
-pub enum Error {
-    /// No hashes were provided to [`MagnetLink::new`].
-    #[error("No hashes were provided to the magnet link")]
-    NoHashes,
 }
