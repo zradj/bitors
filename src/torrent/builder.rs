@@ -9,6 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use memmap2::Mmap;
 use path_clean::clean;
 use rayon::prelude::*;
 use sha1::{Digest, Sha1};
@@ -850,36 +851,23 @@ impl TorrentBuilder<state::HasFiles> {
         }
 
         let padded_length = file.length.max(V2_BLOCK_SIZE_U64).next_power_of_two();
-        let num_leaves = (padded_length / V2_BLOCK_SIZE_U64) as usize;
-        let mut sha256 = Sha256::new();
-        let mut reader = BufReader::with_capacity(V2_BLOCK_SIZE, File::open(&file.disk_path)?);
-        let mut chunk = vec![0u8; V2_BLOCK_SIZE];
-        let mut leaves = Vec::with_capacity(num_leaves);
+        let reader = File::open(&file.disk_path)?;
 
-        loop {
-            let mut total = 0;
-            while total < V2_BLOCK_SIZE {
-                match reader.read(&mut chunk[total..]) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            if total == 0 {
-                break;
-            }
+        let mmap = unsafe { Mmap::map(&reader)? };
 
-            sha256.update(&chunk[..total]);
-            leaves.push(sha256.finalize_reset().into());
-        }
+        let leaves = mmap
+            .par_chunks(V2_BLOCK_SIZE)
+            .map_init(Sha256::new, |sha256, chunk| {
+                sha256.update(chunk);
+                sha256.finalize_reset().into()
+            })
+            .collect();
 
         Ok(Self::compute_v2_merkle_tree(
             leaves,
             file.length,
             padded_length,
             piece_length,
-            sha256,
         ))
     }
 
@@ -888,8 +876,8 @@ impl TorrentBuilder<state::HasFiles> {
         file_length: u64,
         padded_length: u64,
         piece_length: usize,
-        mut sha256: Sha256,
     ) -> V2FileHashes {
+        let mut sha256 = Sha256::new();
         let num_leaves = (padded_length / V2_BLOCK_SIZE_U64) as usize;
         let target_depth = (piece_length / V2_BLOCK_SIZE).ilog2();
         let mut piece_layer = None;

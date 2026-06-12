@@ -1,6 +1,6 @@
-use std::{error::Error, fs::File, io::Read};
+use std::{error::Error, fs::File};
 
-use bitors::{TorrentBuilder, parse_torrent};
+use bitors::TorrentBuilder;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let torrent = TorrentBuilder::from_path("/home/zaur/Telegram")?.build_hybrid()?;
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // println!("{torrent:#?}");
 
-    println!("{}", torrent.magnet_link());
+    // println!("{}", torrent.magnet_link());
 
     Ok(())
 }

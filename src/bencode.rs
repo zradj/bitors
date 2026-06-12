@@ -9,18 +9,34 @@ use crate::torrent::{
     FileInfo, FileLeaf, FileMode, FileTree, FileTreeNode, Info, Torrent, TorrentV2Ext,
 };
 
+/// A zero-copy [Bencode](https://en.wikipedia.org/wiki/Bencode) element representation.
+///
+/// Bencode is the encoding used by BitTorrent. Four types of data can be represented by bencode:
+/// 1. *Signed integers*: encoded in the form `i<num>e`.
+/// 2. *Bytes*: encoded in the form `<length>:<bytes>`.
+/// 3. *Lists*: encoded in the form `l<items>e`.
+/// 4. *Dictionaries*: encoded in the form `d<key1><value1><key2>...e`. The keys must be
+///    represented as [byte strings](`Bencode::Bytes`) and appear in sorted order.
+///
+/// [`Parser`] provides a way to produce [`Bencode`] from raw data.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Bencode<'a> {
+    /// A signed 64-bit integer.
     Int(i64),
-
+    /// A slice of bytes.
     Bytes(&'a [u8]),
-
+    /// A list of other bencoded items.
     List(Vec<Bencode<'a>>),
-
+    /// A dictionary mapping byte keys to bencoded items.
     Dict(BTreeMap<&'a [u8], Bencode<'a>>),
 }
 
 impl<'a> Bencode<'a> {
+    /// Returns the 64-bit signed integer stored in this [`Bencode`] element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Int`].
     pub fn as_int(&self) -> Result<i64, Error> {
         match self {
             Self::Int(i) => Ok(*i),
@@ -28,6 +44,11 @@ impl<'a> Bencode<'a> {
         }
     }
 
+    /// Returns the byte slice referenced in this [`Bencode`] element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Bytes`].
     pub fn as_bytes(&self) -> Result<&'a [u8], Error> {
         match self {
             Self::Bytes(b) => Ok(b),
@@ -35,6 +56,11 @@ impl<'a> Bencode<'a> {
         }
     }
 
+    /// Returns a reference to the list stored in this [`Bencode`] element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::List`].
     pub fn as_list(&self) -> Result<&[Bencode<'a>], Error> {
         match self {
             Self::List(l) => Ok(l),
@@ -42,6 +68,11 @@ impl<'a> Bencode<'a> {
         }
     }
 
+    /// Returns a reference to the dictionary stored in this [`Bencode`] element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Dict`].
     pub fn as_dict(&self) -> Result<&BTreeMap<&[u8], Bencode<'a>>, Error> {
         match self {
             Self::Dict(d) => Ok(d),
@@ -49,11 +80,24 @@ impl<'a> Bencode<'a> {
         }
     }
 
+    /// Converts the bytes referenced in this [`Bencode`] element to a string slice and
+    /// returns it.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::WrongType`] if the underlying variant is not [`Bencode::Bytes`].
+    /// - [`Error::InvalidUtf8`] if the bytes cannot be represented as a valid UTF-8 encoded
+    ///   string.
     pub fn as_str(&self) -> Result<&'a str, Error> {
         let bytes = self.as_bytes()?;
         Ok(std::str::from_utf8(bytes)?)
     }
 
+    /// Consumes this [`Bencode`] element and returns the list stored in it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::List`].
     pub fn into_list(self) -> Result<Vec<Bencode<'a>>, Error> {
         match self {
             Self::List(l) => Ok(l),
@@ -61,6 +105,11 @@ impl<'a> Bencode<'a> {
         }
     }
 
+    /// Consumes this [`Bencode`] element and returns the dictionary stored in it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Dict`].
     pub fn into_dict(self) -> Result<BTreeMap<&'a [u8], Bencode<'a>>, Error> {
         match self {
             Self::Dict(d) => Ok(d),
@@ -68,22 +117,40 @@ impl<'a> Bencode<'a> {
         }
     }
 
+    /// Encodes this [`Bencode`] element as a vector of bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.encoded_len());
-        #[expect(clippy::missing_panics_doc, reason = "infallible")]
-        self.encode_to_writer(&mut buf)
-            .expect("Writing to Vec should not fail");
+        let _ = self.encode_to_writer(&mut buf);
         buf
     }
 
+    /// Encodes this [`Bencode`] element by extending an existing vector of bytes.
     pub fn encode_extend(&self, buf: &mut Vec<u8>) {
         buf.reserve_exact(self.encoded_len());
-        #[expect(clippy::missing_panics_doc, reason = "infallible")]
-        self.encode_to_writer(buf)
-            .expect("Writing to Vec should not fail");
+        let _ = self.encode_to_writer(buf);
     }
 
+    /// Encodes this [`Bencode`] element directly to a [writer](`Write`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`io::Error`] returned by the [writer](`Write`).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::{error::Error, fs::File};
+    /// # use bitors::{Torrent, bencode::Bencode};
+    /// # fn main() -> Result<(), Box<dyn Error>> {
+    /// let torrent = Torrent::builder().add_path("my_file")?.build()?;
+    /// let mut file = File::create("my_file.torrent")?;
+    ///
+    /// torrent.to_bencode().encode_to_writer(&mut file)?;
+    /// # Ok(())
+    /// # }
+    ///
+    /// ```
     pub fn encode_to_writer<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
             Self::Int(i) => write!(writer, "i{i}e")?,
@@ -111,6 +178,7 @@ impl<'a> Bencode<'a> {
         Ok(())
     }
 
+    /// Calculates the exact length of the encoded form of this [`Bencode`] element in bytes.
     pub fn encoded_len(&self) -> usize {
         match self {
             Self::Int(i) => encoded_int_len(*i),
@@ -126,6 +194,14 @@ impl<'a> Bencode<'a> {
     }
 }
 
+/// A helper function that calculates the length of a [`Bencode::Int`] variant in its encoded form.
+///
+/// The length of the text representation of an integer is calculated mathematically. The formula for
+/// a positive integer is as follows: `1 + floor(log10(num))`. The length of a negative number is calculated
+/// similarly by taking the absolute value and accounting for the minus sign (+1 to the length). The length
+/// of 0 is always 1.
+///
+/// The result of the previous calculation is then increased by 2 to account for the bencode format (`i<num>e`).
 fn encoded_int_len(i: i64) -> usize {
     match i {
         // i0e
@@ -137,6 +213,11 @@ fn encoded_int_len(i: i64) -> usize {
     }
 }
 
+/// A helper function that calculates the length of a [`Bencode::Bytes`] variant in its encoded form.
+///
+/// The function first calculates the length of the text representation of the length of the byte slice (see
+/// [`encoded_int_len`]). After that, it adds the length of the byte slice and 1 for the colon in the bencode
+/// representation.
 fn encoded_bytes_len(byte_len: usize) -> usize {
     let len_str_len = if byte_len == 0 {
         1
@@ -149,6 +230,13 @@ fn encoded_bytes_len(byte_len: usize) -> usize {
 }
 
 impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
+    /// Serializes a [`Torrent`] into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains the serialized [`info`](`Info`) dictionary as well as other
+    /// optional fields from [`Torrent`] if set.
+    ///
+    /// The `piece layers` field (represented by [`TorrentV2Ext`]) is not included in v1-only torrents. See
+    /// the `From<&TorrentV2Ext>` implementation on [`Bencode`] for more information.
     fn from(torrent: &'a Torrent) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -210,6 +298,14 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a TorrentV2Ext<'a>> for Bencode<'a> {
+    /// Serializes a [`TorrentV2Ext`] into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains a dictionary that maps
+    /// v2 file hashes from the [`file tree`](`crate::torrent::InfoV2::file_tree`) field in the
+    /// [`info`](`crate::torrent::InfoV2`) dictionary to the hashes from a certain layer of the Merkle hash tree
+    /// of that file. See [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) for more details.
+    ///
+    /// Not present in v1-only torrents.
     fn from(ext: &'a TorrentV2Ext<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -222,6 +318,25 @@ impl<'a> From<&'a TorrentV2Ext<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a Info<'a>> for Bencode<'a> {
+    /// Serializes an [`Info`] into its bencode representation, the `info` dictionary.
+    ///
+    /// The output is a [`Bencode::Dict`]. The following keys are always present: [`name`](Info::name),
+    /// [`piece length`](Info::piece_length). The `private` field is included (and set to 1) only if [`Info::private`] is `true`.
+    ///
+    /// Other fields are included only if set to [`Some`]. These include the [`source`](Info::source) field, as well as the
+    /// following version-specific fields:
+    ///
+    /// - [`pieces`](crate::torrent::InfoV1::pieces) - always included in a v1 torrent.
+    ///   - [`length`](FileMode::Single::length), [`md5sum`](FileMode::Single::md5sum) - included if the v1 torrent
+    ///     consists of a single file.
+    ///   - [`files`](FileMode::Multi::files) - included if the v1 torrent consists of multiple files. In this case,
+    ///     a list of [file information items](FileInfo) is included. See the `From<&FileInfo>` implementation on [`Bencode`]
+    ///     for more information.
+    /// - [`meta version`](crate::torrent::InfoV2::meta_version), [`file tree`](crate::torrent::InfoV2::file_tree) -
+    ///   always included in a v2 torrent. `meta version` is always set to 2. `file tree` contains the v2 file tree. See
+    ///   the `From<&FileTree>` implementation of [`Bencode`] for more information.
+    ///
+    /// Hybrid torrents contain all of the fields from both of the options above.
     fn from(info: &'a Info<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -272,6 +387,15 @@ impl<'a> From<&'a Info<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
+    /// Serializes a [`FileInfo`] into its bencode representation.
+    ///
+    /// Since [`FileInfo`] represents an entry in the [`files`](FileMode::Multi::files) list,
+    /// it is serialized as a [`Bencode::Dict`] with the fields [`length`](FileInfo::length)
+    /// and [`path`](FileInfo::path). It may also optionally contain the fields [`md5sum`](FileInfo::md5sum)
+    /// and [`attr`](FileInfo::attr). For more information on the latter, see
+    /// [`FileInfoAttr::encoded`](`crate::torrent::FileInfoAttr::encoded`).
+    ///
+    /// Not present in v2-only torrents.
     fn from(file_info: &'a FileInfo<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -301,6 +425,15 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
+    /// Serializes a [`FileTree`] into its bencode representation, the `file tree` field,
+    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
+    ///
+    /// The output is a [`Bencode::Dict`] that contains one or more trees of path components.
+    /// Each child, represented by [`FileTreeNode`], contains either another [`FileTree`] or
+    /// a [`FileLeaf`] representation. See the `From<&FileTreeNode>` implementation on [`Bencode`]
+    /// for more information.
+    ///
+    /// Not present in v1-only torrents.
     fn from(tree: &'a FileTree<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -313,6 +446,17 @@ impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a FileTreeNode<'a>> for Bencode<'a> {
+    /// Serializes a [`FileTreeNode`] inside a [`FileTree`] into its bencode representation
+    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
+    ///
+    /// The output is a [`Bencode::Dict`] whose content depends on the variant of [`FileTreeNode`]:
+    ///
+    /// - **[`FileTreeNode::Directory`]** - all of [`FileTreeNode`] representations in the underlying [`FileTree`].
+    /// - **[`FileTreeNode::File`]** - an entry with an empty key (`b""`) and the representation of the underlying
+    ///   [`FileLeaf`] as the value. The file name is the concatenation of all path components leading to this empty key.
+    ///   See the `From<&FileLeaf>` implementation on [`Bencode`] for more information.
+    ///
+    /// Not present in v1-only torrents.
     fn from(node: &'a FileTreeNode<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -332,9 +476,19 @@ impl<'a> From<&'a FileTreeNode<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a FileLeaf<'a>> for Bencode<'a> {
+    /// Serializes a [`FileLeaf`] inside a [`FileTreeNode`] into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains the [`length`](`FileLeaf::length`) field.
+    /// It also contains the [`pieces root`](`FileLeaf::pieces_root`) field if the file is not empty.
+    ///
+    /// Not present in v1-only torrents.
     fn from(leaf: &'a FileLeaf<'a>) -> Self {
         let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
+        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // approaches that size.
+        #[allow(clippy::cast_possible_wrap)]
         map.insert(b"length", Self::Int(leaf.length as i64));
 
         if let Some(pieces_root) = &leaf.pieces_root {
@@ -345,21 +499,80 @@ impl<'a> From<&'a FileLeaf<'a>> for Bencode<'a> {
     }
 }
 
+/// A zero-copy parser for raw bencoded data.
+///
+/// The parser enforces all bencode rules as described by [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
+/// The parser also provides a defense mechanism against stack overflow attacks by tracking the nesting depth
+/// and checking it against the maximum depth. The maximum depth is configurable using [`Parser::with_max_depth`].
+///
+/// There is also the shorthand function [`parse_torrent`] that creates a [`Torrent`] instance
+/// from raw data without going through the intermediate steps.
+///
+/// [`parse_torrent`]: crate::parse_torrent
+///
+/// # Examples
+///
+/// Creation:
+///
+/// ```
+/// # use bitors::Parser;
+/// let mut parser = Parser::new(b"l4:cool6:parser2:at4:worke".as_slice());
+/// let bencode = parser.parse().unwrap();
+///
+/// assert_eq!(bencode.encode(), b"l4:cool6:parser2:at4:worke");
+/// ```
+///
+/// Torrent file parsing and creating a [`Torrent`] instance:
+///
+/// ```no_run
+/// # use std::{fs::File, io::Read, error::Error};
+/// # use bitors::{Parser, Torrent};
+/// # fn main() -> Result<(), Box<dyn Error>> {
+/// let mut file = File::open("my_torrent.torrent")?;
+/// let mut data = vec![];
+/// file.read_to_end(&mut data);
+///
+/// let mut parser = Parser::new(&data);
+/// let torrent = Torrent::try_from(parser.parse()?)?;
+///
+/// // Do something else...
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Parser<'a> {
+    /// The data this parser is parsing.
     data: &'a [u8],
-
+    /// A pointer that tracks the parser's current position in the data.
     cursor: usize,
-
+    /// The maximum nesting depth. Exceeding this depth will lead to [`Error::DepthLimitExceeded`].
     max_depth: usize,
 }
 
 impl<'a> Parser<'a> {
+    /// Creates a new [`Parser`] instance with the given data and the default maximum nesting depth of 64.
+    ///
+    /// The maximum nesting depth can be configured using the [`Parser::with_max_depth`] constructor.
     #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self::with_max_depth(data, 64)
     }
 
+    /// Creates a new [`Parser`] instance with the given data and maximum nesting depth.
+    ///
+    /// The maximum nesting depth provides defense against stack overflow attacks that use malicious
+    /// torrent inputs (i.e. `<thousands of 'l's><thousands of 'e's>`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use bitors::{Parser, bencode::Error};
+    /// let data: &[u8] = b"llllllllleeeeeeeee"; // A nested list with the depth of 9
+    /// let mut parser = Parser::with_max_depth(data, 8);
+    /// let result = parser.parse();
+    ///
+    /// assert!(matches!(result, Err(Error::DepthLimitExceeded)));
+    /// ```
     #[must_use]
     pub fn with_max_depth(data: &'a [u8], max_depth: usize) -> Self {
         Self {
@@ -369,10 +582,28 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses the provided data and returns the resulting [`Bencode`] element.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::UnexpectedByte`] if the parser encountered an unexpected byte in the data.
+    /// - [`Error::UnexpectedEof`] if the EOF (end-of-file) was reached prematurely.
+    /// - [`Error::DepthLimitExceeded`] if the maximum nesting depth was exceeded during parsing.
+    /// - [`Error::InvalidInteger`] if an integer could not be parsed by Rust.
+    /// - [`Error::InvalidBencodeInteger`] if an integer violated the bencode format
+    ///   (see [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding)). This happens
+    ///   when an integer has a leading zero (`i01e`) or if a negative zero was provided
+    ///   (`i-0e`).
+    /// - [`Error::NonStringKey`] if a dictionary contained a non-string key (i.e. a key that is not [`Bencode::Bytes`]).
+    ///   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding) requires that all dictionary keys
+    ///   be strings.
+    /// - [`Error::UnsortedDictKeys`] if a dictionary's keys appeared in a non-sorted order. This is required by
+    ///   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
-        self.parse_internal(0)
+        self.parse_internal(1)
     }
 
+    /// Peeks at the current byte in the data. Returns [`Error::UnexpectedEof`] if there is none.
     fn peek(&self) -> Result<u8, Error> {
         self.data
             .get(self.cursor)
@@ -380,12 +611,16 @@ impl<'a> Parser<'a> {
             .ok_or(Error::UnexpectedEof)
     }
 
+    /// Peeks at a slice of the given length at the current position in the data.
+    /// Returns [`Error::UnexpectedEof`] if there is none.
     fn peek_slice(&self, len: usize) -> Result<&'a [u8], Error> {
         self.data
             .get(self.cursor..self.cursor + len)
             .ok_or(Error::UnexpectedEof)
     }
 
+    /// An internal helper method that tracks the current nesting depth. For more information,
+    /// see [`Parser::parse`].
     fn parse_internal(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         if depth > self.max_depth {
             return Err(Error::DepthLimitExceeded);
@@ -400,6 +635,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses an integer at the current position in the data.
     fn parse_integer(&mut self) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let end = self.data[self.cursor..]
@@ -418,6 +654,7 @@ impl<'a> Parser<'a> {
         Ok(Bencode::Int(i))
     }
 
+    /// Extracts a byte string at the current position in the data.
     fn parse_bytes(&mut self) -> Result<Bencode<'a>, Error> {
         let colon = self.data[self.cursor..]
             .iter()
@@ -437,6 +674,8 @@ impl<'a> Parser<'a> {
         Ok(Bencode::Bytes(bytes))
     }
 
+    /// Parses a list of other bencoded items at the current position in the data. Increases the
+    /// current nesting depth.
     fn parse_list(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut list = vec![];
@@ -449,6 +688,8 @@ impl<'a> Parser<'a> {
         Ok(Bencode::List(list))
     }
 
+    /// Parses a dictionary at the current position in the data. Increases the
+    /// current nesting depth.
     fn parse_dict(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
         let mut map = BTreeMap::new();
@@ -476,34 +717,45 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Errors that can arise while parsing using [`Parser`] or working with [`Bencode`].
 #[derive(Debug, Error)]
 pub enum Error {
+    /// A byte slice in [`Bencode`] cannot be converted to a UTF-8 encoded [`str`].
     #[error("UTF-8 error: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
-
+    /// An expected integer could not be parsed by Rust.
     #[error("Integer parsing error: {0}")]
     InvalidInteger(#[from] std::num::ParseIntError),
-
+    /// The raw representation of an integer violated the bencode format described in
+    /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding). The integer either had
+    /// a leading zero (`i01e`) or was a negative zero (`i-0e`).
     #[error("Invalid Bencode integer representation: {0}")]
     InvalidBencodeInteger(String),
-
+    /// An unexpected byte was encountered at a certain position in the data during parsing.
+    /// This means the bencode is malformed.
     #[error("Unexpected byte at position {0}: {1}")]
     UnexpectedByte(usize, u8),
-
+    /// The maximum nesting depth limit was exceeded during parsing.
     #[error("Depth limit exceeded")]
     DepthLimitExceeded,
-
+    /// The parser encountered an EOF (end-of-file) prematurely. This means the bencode is malformed.
     #[error("Unexpected EOF")]
     UnexpectedEof,
-
+    /// The keys of a dictionary were not sorted. This is required by
+    /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
     #[error("Unsorted dict keys")]
     UnsortedDictKeys,
-
+    /// A key of a dictionary was not a byte string (i.e. [`Bencode::Bytes`]). This is required by
+    /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
     #[error("Keys of Bencode dictionaries must be strings")]
     NonStringKey,
-
+    /// A [`Bencode`] accessor method (e.g. [`as_int`](Bencode::as_int)) was called on
+    /// a value of a different variant.
     #[error("Wrong Bencode type, expected {expected}")]
-    WrongType { expected: &'static str },
+    WrongType {
+        /// A short description of the expected type (e.g. `"int"` or `"dict"`).
+        expected: &'static str,
+    },
 }
 
 #[cfg(test)]

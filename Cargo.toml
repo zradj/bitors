@@ -13,6 +13,7 @@ keywords = ["bittorrent", "torrent", "bencode", "metainfo", "p2p"]
 bitflags = "2.13.0"
 data-encoding = "2.11.0"
 digest-io = "0.1.0"
+memmap2 = "0.9.10"
 path-clean = "1.0.1"
 percent-encoding = "2.3.2"
 rayon = "1.12.0"

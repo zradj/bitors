@@ -141,6 +141,22 @@ impl Torrent<'_> {
         }
     }
 
+    /// Generates a [`MagnetLink`] for this torrent.
+    ///
+    /// A magnet link contains the torrent's info hash(es). It can also optionally contain the name,
+    /// the total size, and the trackers.
+    ///
+    /// This is equivalent to [`MagnetLink::from`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitors::Torrent;
+    ///
+    /// let torrent = Torrent::builder().add_path("my_file").unwrap().build().unwrap();
+    /// println!("{}", torrent.magnet_link());
+    /// // Hybrid torrent: magnet:?xt=urn:btih:<v1 hash>&xt=urn:btmh:<v2 hash>...
+    /// ```
     #[must_use]
     pub fn magnet_link(&self) -> MagnetLink {
         MagnetLink::from(self)
