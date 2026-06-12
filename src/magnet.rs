@@ -7,11 +7,46 @@ use url::Url;
 
 use crate::torrent::Torrent;
 
+/// A set of characters that must be percent encoded in a magnet link.
+///
+/// It includes all non-alphanumeric characters with the exception of
+/// [RFC 3986 section 2.3 Unreserved Characters](https://en.wikipedia.org/wiki/Percent-encoding#Percent-encoding_in_a_URI).
 const URI_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
     .remove(b'_')
     .remove(b'~');
+
+/// Contains the info hash(es) used in [`MagnetLink`].
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum InfoHashes {
+    /// The info hash of a v1-only torrent.
+    V1([u8; 20]),
+    /// The info hash of a v2-only torrent.
+    V2([u8; 32]),
+    /// The v1 and v2 info hashes of a hybrid torrent.
+    Hybrid { v1: [u8; 20], v2: [u8; 32] },
+}
+
+impl InfoHashes {
+    /// Returns the v1 info hash of a v1-only or hybrid torrent. Returns [`None`] if the torrent is v2-only.
+    #[must_use]
+    pub fn v1(&self) -> Option<&[u8; 20]> {
+        match self {
+            Self::V1(v1) | Self::Hybrid { v1, .. } => Some(v1),
+            Self::V2(_) => None,
+        }
+    }
+
+    /// Returns the v2 info hash of a v2-only or hybrid torrent. Returns [`None`] if the torrent is v1-only.
+    #[must_use]
+    pub fn v2(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::V2(v2) | Self::Hybrid { v2, .. } => Some(v2),
+            Self::V1(_) => None,
+        }
+    }
+}
 
 /// A [magnet link](https://en.wikipedia.org/wiki/Magnet_URI_scheme) representation.
 ///
@@ -32,10 +67,8 @@ const URI_SET: &AsciiSet = &NON_ALPHANUMERIC
 /// ```
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct MagnetLink {
-    /// The SHA-1 info hash of a v1-only or hybrid torrent. Set to [`None`] if the torrent is v2-only.
-    info_hash_v1: Option<[u8; 20]>,
-    /// The SHA-256 info hash of a v2-only or hybrid torrent. Set to [`None`] if the torrent is v1-only.
-    info_hash_v2: Option<[u8; 32]>,
+    /// The torrent's info hash(es).
+    pub info_hashes: InfoHashes,
     /// The optional name of the torrent.
     pub name: Option<String>,
     /// A flat list of the torrent trackers ([`Torrent::announce_list`]).
@@ -50,28 +83,15 @@ pub struct MagnetLink {
 }
 
 impl MagnetLink {
-    /// Creates a new [`MagnetLink`] with the given hash(es) directly.
-    ///
-    /// It is required to provide at least one hash.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::NoHashes`] if no hashes were provided to the constructor.
-    pub fn new(
-        info_hash_v1: Option<[u8; 20]>,
-        info_hash_v2: Option<[u8; 32]>,
-    ) -> Result<Self, Error> {
-        if info_hash_v1.is_none() && info_hash_v2.is_none() {
-            Err(Error::NoHashes)
-        } else {
-            Ok(Self {
-                info_hash_v1,
-                info_hash_v2,
-                name: None,
-                trackers: vec![],
-                size: None,
-                v1_base32: false,
-            })
+    /// Creates a new [`MagnetLink`] with the given hashes directly.
+    #[must_use]
+    pub fn new(info_hashes: InfoHashes) -> Self {
+        Self {
+            info_hashes,
+            name: None,
+            trackers: vec![],
+            size: None,
+            v1_base32: false,
         }
     }
 
@@ -102,9 +122,15 @@ impl From<&Torrent<'_>> for MagnetLink {
     fn from(torrent: &Torrent) -> Self {
         let trackers = torrent.trackers().into_iter().flatten().cloned().collect();
 
+        let info_hashes = match (torrent.info_hash_v1(), torrent.info_hash_v2()) {
+            (Some(v1), Some(v2)) => InfoHashes::Hybrid { v1, v2 },
+            (Some(v1), None) => InfoHashes::V1(v1),
+            (None, Some(v2)) => InfoHashes::V2(v2),
+            (None, None) => unreachable!(),
+        };
+
         Self {
-            info_hash_v1: torrent.info_hash_v1(),
-            info_hash_v2: torrent.info_hash_v2(),
+            info_hashes,
             name: Some(torrent.info.name.to_string()),
             trackers,
             size: Some(torrent.total_size()),
@@ -130,7 +156,7 @@ impl fmt::Display for MagnetLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "magnet:")?;
 
-        if let Some(info_hash_v1) = &self.info_hash_v1 {
+        if let Some(info_hash_v1) = self.info_hashes.v1() {
             let mut buf = if self.v1_base32 {
                 vec![0u8; 32]
             } else {
@@ -142,11 +168,11 @@ impl fmt::Display for MagnetLink {
             write!(f, "?xt=urn:btih:{}", std::str::from_utf8(&buf).unwrap())?;
         }
 
-        if let Some(info_hash_v2) = &self.info_hash_v2 {
+        if let Some(info_hash_v2) = self.info_hashes.v2() {
             let mut buf = [0u8; 64];
             HEXLOWER.encode_mut(info_hash_v2, &mut buf);
 
-            let prefix = if self.info_hash_v1.is_some() {
+            let prefix = if self.info_hashes.v1().is_some() {
                 '&'
             } else {
                 '?'
