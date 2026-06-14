@@ -6,8 +6,97 @@ use std::{
 use thiserror::Error;
 
 use crate::torrent::{
-    FileInfo, FileLeaf, FileMode, FileTree, FileTreeNode, Info, Torrent, TorrentV2Ext,
+    FileInfo, FileLeaf, FileMode, FileTree, FileTreeNode, Info, InfoHybrid, InfoV1, InfoV2,
+    IntoOwned, PieceLayers, Torrent, TorrentMeta,
 };
+
+/// A helper function that calculates the length of a [`Bencode::Int`] variant in its encoded form.
+///
+/// The length of the text representation of an integer is calculated mathematically. The formula for
+/// a positive integer is as follows: `1 + floor(log10(num))`. The length of a negative number is calculated
+/// similarly by taking the absolute value and accounting for the minus sign (+1 to the length). The length
+/// of 0 is always 1.
+///
+/// The result of the previous calculation is then increased by 2 to account for the bencode format (`i<num>e`).
+fn encoded_int_len(i: i64) -> usize {
+    match i {
+        // i0e
+        0 => 3,
+        // i-<abs>e
+        n if n < 0 => 3 + (1 + n.unsigned_abs().ilog10() as usize),
+        // i<num>e
+        n => 2 + (1 + n.ilog10() as usize),
+    }
+}
+
+/// A helper function that calculates the length of a [`Bencode::Bytes`] variant in its encoded form.
+///
+/// The function first calculates the length of the text representation of the length of the byte slice (see
+/// [`encoded_int_len`]). After that, it adds the length of the byte slice and 1 for the colon in the bencode
+/// representation.
+fn encoded_bytes_len(byte_len: usize) -> usize {
+    let len_str_len = if byte_len == 0 {
+        1
+    } else {
+        1 + byte_len.ilog10() as usize
+    };
+
+    // <len>:<bytes>
+    len_str_len + byte_len + 1
+}
+
+fn insert_info_common_fields<'a, T: IntoOwned>(
+    dict: &mut BTreeMap<&[u8], Bencode<'a>>,
+    info: &'a Info<'a, T>,
+) {
+    dict.insert(b"name", Bencode::Bytes(info.name.as_bytes()));
+    // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+    // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+    // approaches that size.
+    #[allow(clippy::cast_possible_wrap)]
+    dict.insert(
+        b"piece length",
+        Bencode::Int(info.piece_length.get() as i64),
+    );
+
+    if info.private {
+        dict.insert(b"private", Bencode::Int(1));
+    }
+
+    if let Some(source) = &info.source {
+        dict.insert(b"source", Bencode::Bytes(source.as_bytes()));
+    }
+}
+
+fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a InfoV1<'a>) {
+    dict.insert(b"pieces", Bencode::Bytes(info.pieces.as_flattened()));
+
+    match &info.file_mode {
+        FileMode::Single { length, md5sum } => {
+            // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+            // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+            // approaches that size.
+            #[allow(clippy::cast_possible_wrap)]
+            dict.insert(b"length", Bencode::Int(*length as i64));
+
+            if let Some(md5sum) = md5sum {
+                dict.insert(b"md5sum", Bencode::Bytes(md5sum.as_bytes()));
+            }
+        }
+        FileMode::Multi { files } => {
+            let files = files.iter().map(Bencode::from).collect();
+            dict.insert(b"files", Bencode::List(files));
+        }
+    }
+}
+
+fn insert_info_v2_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a InfoV2<'a>) {
+    dict.insert(
+        b"meta version",
+        Bencode::Int(i64::from(InfoV2::META_VERSION)),
+    );
+    dict.insert(b"file tree", (&info.file_tree).into());
+}
 
 /// A zero-copy [Bencode](https://en.wikipedia.org/wiki/Bencode) element representation.
 ///
@@ -29,6 +118,268 @@ pub enum Bencode<'a> {
     List(Vec<Bencode<'a>>),
     /// A dictionary mapping byte keys to bencoded items.
     Dict(BTreeMap<&'a [u8], Bencode<'a>>),
+}
+
+impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
+    /// Serializes a [`Torrent`] into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains the serialized [`info`](`Info`) dictionary as well as other
+    /// optional fields from [`Torrent`] if set.
+    ///
+    /// The `piece layers` field (represented by [`TorrentV2Ext`]) is not included in v1-only torrents. See
+    /// the `From<&TorrentV2Ext>` implementation on [`Bencode`] for more information.
+    fn from(torrent: &'a Torrent) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        match &torrent.meta {
+            TorrentMeta::V1 { info } => {
+                dict.insert(b"info", info.to_bencode());
+            }
+            TorrentMeta::V2 { info, piece_layers } => {
+                dict.insert(b"info", info.into());
+                dict.insert(b"piece layers", piece_layers.into());
+            }
+            TorrentMeta::Hybrid { info, piece_layers } => {
+                dict.insert(b"info", info.into());
+                dict.insert(b"piece layers", piece_layers.into());
+            }
+        }
+
+        if let Some(url) = &torrent.announce {
+            dict.insert(b"announce", Self::Bytes(url.as_str().as_bytes()));
+        }
+
+        if let Some(announce_list) = &torrent.announce_list {
+            let announce_list = announce_list
+                .iter()
+                .map(|v| {
+                    let urls = v
+                        .iter()
+                        .map(|url| Self::Bytes(url.as_str().as_bytes()))
+                        .collect();
+                    Self::List(urls)
+                })
+                .collect();
+
+            dict.insert(b"announce-list", Self::List(announce_list));
+        }
+
+        if let Some(url_list) = &torrent.url_list {
+            let url_list = url_list
+                .iter()
+                .map(|url| Self::Bytes(url.as_str().as_bytes()))
+                .collect();
+
+            dict.insert(b"url-list", Self::List(url_list));
+        }
+
+        if let Some(creation_date) = torrent.creation_date {
+            dict.insert(
+                b"creation date",
+                Self::Int(creation_date.try_into().unwrap_or(0)),
+            );
+        }
+
+        if let Some(comment) = &torrent.comment {
+            dict.insert(b"comment", Self::Bytes(comment.as_bytes()));
+        }
+
+        if let Some(created_by) = &torrent.created_by {
+            dict.insert(b"created by", Self::Bytes(created_by.as_bytes()));
+        }
+
+        if let Some(encoding) = &torrent.encoding {
+            dict.insert(b"encoding", Self::Bytes(encoding.as_bytes()));
+        }
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a PieceLayers<'a>> for Bencode<'a> {
+    /// Serializes [`PieceLayers`] into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains a dictionary that maps
+    /// v2 file hashes from the [`file tree`](`crate::torrent::InfoV2::file_tree`) field in the
+    /// [`info`](`crate::torrent::InfoV2`) dictionary to the hashes from a certain layer of the Merkle hash tree
+    /// of that file. See [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) for more details.
+    ///
+    /// Not present in v1-only torrents.
+    fn from(piece_layers: &'a PieceLayers<'a>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        for (k, v) in &piece_layers.0 {
+            dict.insert(k.as_ref(), Self::Bytes(v));
+        }
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a Info<'a, InfoV1<'a>>> for Bencode<'a> {
+    /// Serializes an [`Info`] into its bencode representation, the `info` dictionary.
+    ///
+    /// The output is a [`Bencode::Dict`]. The following keys are always present: [`name`](Info::name),
+    /// [`piece length`](Info::piece_length). The `private` field is included (and set to 1) only if [`Info::private`] is `true`.
+    ///
+    /// Other fields are included only if set to [`Some`]. These include the [`source`](Info::source) field, as well as the
+    /// following version-specific fields:
+    ///
+    /// - [`pieces`](crate::torrent::InfoV1::pieces) - always included in a v1 torrent.
+    ///   - [`length`](FileMode::Single::length), [`md5sum`](FileMode::Single::md5sum) - included if the v1 torrent
+    ///     consists of a single file.
+    ///   - [`files`](FileMode::Multi::files) - included if the v1 torrent consists of multiple files. In this case,
+    ///     a list of [file information items](FileInfo) is included. See the `From<&FileInfo>` implementation on [`Bencode`]
+    ///     for more information.
+    /// - [`meta version`](crate::torrent::InfoV2::meta_version), [`file tree`](crate::torrent::InfoV2::file_tree) -
+    ///   always included in a v2 torrent. `meta version` is always set to 2. `file tree` contains the v2 file tree. See
+    ///   the `From<&FileTree>` implementation of [`Bencode`] for more information.
+    ///
+    /// Hybrid torrents contain all of the fields from both of the options above.
+    fn from(info: &'a Info<'a, InfoV1<'a>>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        insert_info_common_fields(&mut dict, info);
+        insert_info_v1_fields(&mut dict, &info.kind);
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a Info<'a, InfoV2<'a>>> for Bencode<'a> {
+    fn from(info: &'a Info<'a, InfoV2<'a>>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        insert_info_common_fields(&mut dict, info);
+        insert_info_v2_fields(&mut dict, &info.kind);
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a Info<'a, InfoHybrid<'a>>> for Bencode<'a> {
+    fn from(info: &'a Info<'a, InfoHybrid<'a>>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        insert_info_common_fields(&mut dict, info);
+        insert_info_v1_fields(&mut dict, &info.kind.v1);
+        insert_info_v2_fields(&mut dict, &info.kind.v2);
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
+    /// Serializes a [`FileInfo`] into its bencode representation.
+    ///
+    /// Since [`FileInfo`] represents an entry in the [`files`](FileMode::Multi::files) list,
+    /// it is serialized as a [`Bencode::Dict`] with the fields [`length`](FileInfo::length)
+    /// and [`path`](FileInfo::path). It may also optionally contain the fields [`md5sum`](FileInfo::md5sum)
+    /// and [`attr`](FileInfo::attr). For more information on the latter, see
+    /// [`FileInfoAttr::encoded`](`crate::torrent::FileInfoAttr::encoded`).
+    ///
+    /// Not present in v2-only torrents.
+    fn from(file_info: &'a FileInfo<'a>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        if let Some(attr) = &file_info.attr {
+            dict.insert(b"attr", Self::Bytes(attr.as_bytes()));
+        }
+
+        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // approaches that size.
+        #[allow(clippy::cast_possible_wrap)]
+        dict.insert(b"length", Self::Int(file_info.length as i64));
+
+        let path: Vec<Self> = file_info
+            .path
+            .iter()
+            .map(|s| Self::Bytes(s.as_bytes()))
+            .collect();
+        dict.insert(b"path", Self::List(path));
+
+        if let Some(md5sum) = &file_info.md5sum {
+            dict.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
+        }
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
+    /// Serializes a [`FileTree`] into its bencode representation, the `file tree` field,
+    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
+    ///
+    /// The output is a [`Bencode::Dict`] that contains one or more trees of path components.
+    /// Each child, represented by [`FileTreeNode`], contains either another [`FileTree`] or
+    /// a [`FileLeaf`] representation. See the `From<&FileTreeNode>` implementation on [`Bencode`]
+    /// for more information.
+    ///
+    /// Not present in v1-only torrents.
+    fn from(tree: &'a FileTree<'a>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        for (k, v) in &tree.0 {
+            dict.insert(k.as_bytes(), v.into());
+        }
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a FileTreeNode<'a>> for Bencode<'a> {
+    /// Serializes a [`FileTreeNode`] inside a [`FileTree`] into its bencode representation
+    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
+    ///
+    /// The output is a [`Bencode::Dict`] whose content depends on the variant of [`FileTreeNode`]:
+    ///
+    /// - **[`FileTreeNode::Directory`]** - all of [`FileTreeNode`] representations in the underlying [`FileTree`].
+    /// - **[`FileTreeNode::File`]** - an entry with an empty key (`b""`) and the representation of the underlying
+    ///   [`FileLeaf`] as the value. The file name is the concatenation of all path components leading to this empty key.
+    ///   See the `From<&FileLeaf>` implementation on [`Bencode`] for more information.
+    ///
+    /// Not present in v1-only torrents.
+    fn from(node: &'a FileTreeNode<'a>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        match node {
+            FileTreeNode::Directory(file_tree) => {
+                for (k, v) in &file_tree.0 {
+                    dict.insert(k.as_bytes(), v.into());
+                }
+            }
+            FileTreeNode::File(file_leaf) => {
+                dict.insert(b"", file_leaf.into());
+            }
+        }
+
+        Self::Dict(dict)
+    }
+}
+
+impl<'a> From<&'a FileLeaf<'a>> for Bencode<'a> {
+    /// Serializes a [`FileLeaf`] inside a [`FileTreeNode`] into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains the [`length`](`FileLeaf::length`) field.
+    /// It also contains the [`pieces root`](`FileLeaf::pieces_root`) field if the file is not empty.
+    ///
+    /// Not present in v1-only torrents.
+    fn from(leaf: &'a FileLeaf<'a>) -> Self {
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+
+        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
+        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // approaches that size.
+        #[allow(clippy::cast_possible_wrap)]
+        dict.insert(b"length", Self::Int(leaf.length as i64));
+
+        if let Some(pieces_root) = &leaf.pieces_root {
+            dict.insert(b"pieces root", Self::Bytes(pieces_root.as_ref()));
+        }
+
+        Self::Dict(dict)
+    }
 }
 
 impl<'a> Bencode<'a> {
@@ -194,311 +545,6 @@ impl<'a> Bencode<'a> {
     }
 }
 
-/// A helper function that calculates the length of a [`Bencode::Int`] variant in its encoded form.
-///
-/// The length of the text representation of an integer is calculated mathematically. The formula for
-/// a positive integer is as follows: `1 + floor(log10(num))`. The length of a negative number is calculated
-/// similarly by taking the absolute value and accounting for the minus sign (+1 to the length). The length
-/// of 0 is always 1.
-///
-/// The result of the previous calculation is then increased by 2 to account for the bencode format (`i<num>e`).
-fn encoded_int_len(i: i64) -> usize {
-    match i {
-        // i0e
-        0 => 3,
-        // i-<abs>e
-        n if n < 0 => 3 + (1 + n.unsigned_abs().ilog10() as usize),
-        // i<num>e
-        n => 2 + (1 + n.ilog10() as usize),
-    }
-}
-
-/// A helper function that calculates the length of a [`Bencode::Bytes`] variant in its encoded form.
-///
-/// The function first calculates the length of the text representation of the length of the byte slice (see
-/// [`encoded_int_len`]). After that, it adds the length of the byte slice and 1 for the colon in the bencode
-/// representation.
-fn encoded_bytes_len(byte_len: usize) -> usize {
-    let len_str_len = if byte_len == 0 {
-        1
-    } else {
-        1 + byte_len.ilog10() as usize
-    };
-
-    // <len>:<bytes>
-    len_str_len + byte_len + 1
-}
-
-impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
-    /// Serializes a [`Torrent`] into its bencode representation.
-    ///
-    /// The output is a [`Bencode::Dict`] that contains the serialized [`info`](`Info`) dictionary as well as other
-    /// optional fields from [`Torrent`] if set.
-    ///
-    /// The `piece layers` field (represented by [`TorrentV2Ext`]) is not included in v1-only torrents. See
-    /// the `From<&TorrentV2Ext>` implementation on [`Bencode`] for more information.
-    fn from(torrent: &'a Torrent) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        map.insert(b"info", (&torrent.info).into());
-
-        if let Some(url) = &torrent.announce {
-            map.insert(b"announce", Self::Bytes(url.as_str().as_bytes()));
-        }
-
-        if let Some(announce_list) = &torrent.announce_list {
-            let announce_list = announce_list
-                .iter()
-                .map(|v| {
-                    let urls = v
-                        .iter()
-                        .map(|url| Self::Bytes(url.as_str().as_bytes()))
-                        .collect();
-                    Self::List(urls)
-                })
-                .collect();
-
-            map.insert(b"announce-list", Self::List(announce_list));
-        }
-
-        if let Some(url_list) = &torrent.url_list {
-            let url_list = url_list
-                .iter()
-                .map(|url| Self::Bytes(url.as_str().as_bytes()))
-                .collect();
-
-            map.insert(b"url-list", Self::List(url_list));
-        }
-
-        if let Some(creation_date) = torrent.creation_date {
-            map.insert(
-                b"creation date",
-                Self::Int(creation_date.try_into().unwrap_or(0)),
-            );
-        }
-
-        if let Some(comment) = &torrent.comment {
-            map.insert(b"comment", Self::Bytes(comment.as_bytes()));
-        }
-
-        if let Some(created_by) = &torrent.created_by {
-            map.insert(b"created by", Self::Bytes(created_by.as_bytes()));
-        }
-
-        if let Some(encoding) = &torrent.encoding {
-            map.insert(b"encoding", Self::Bytes(encoding.as_bytes()));
-        }
-
-        if let Some(v2_ext) = &torrent.v2_ext {
-            map.insert(b"piece layers", v2_ext.into());
-        }
-
-        Self::Dict(map)
-    }
-}
-
-impl<'a> From<&'a TorrentV2Ext<'a>> for Bencode<'a> {
-    /// Serializes a [`TorrentV2Ext`] into its bencode representation.
-    ///
-    /// The output is a [`Bencode::Dict`] that contains a dictionary that maps
-    /// v2 file hashes from the [`file tree`](`crate::torrent::InfoV2::file_tree`) field in the
-    /// [`info`](`crate::torrent::InfoV2`) dictionary to the hashes from a certain layer of the Merkle hash tree
-    /// of that file. See [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) for more details.
-    ///
-    /// Not present in v1-only torrents.
-    fn from(ext: &'a TorrentV2Ext<'a>) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        for (k, v) in &ext.piece_layers {
-            map.insert(k.as_ref(), Self::Bytes(v));
-        }
-
-        Self::Dict(map)
-    }
-}
-
-impl<'a> From<&'a Info<'a>> for Bencode<'a> {
-    /// Serializes an [`Info`] into its bencode representation, the `info` dictionary.
-    ///
-    /// The output is a [`Bencode::Dict`]. The following keys are always present: [`name`](Info::name),
-    /// [`piece length`](Info::piece_length). The `private` field is included (and set to 1) only if [`Info::private`] is `true`.
-    ///
-    /// Other fields are included only if set to [`Some`]. These include the [`source`](Info::source) field, as well as the
-    /// following version-specific fields:
-    ///
-    /// - [`pieces`](crate::torrent::InfoV1::pieces) - always included in a v1 torrent.
-    ///   - [`length`](FileMode::Single::length), [`md5sum`](FileMode::Single::md5sum) - included if the v1 torrent
-    ///     consists of a single file.
-    ///   - [`files`](FileMode::Multi::files) - included if the v1 torrent consists of multiple files. In this case,
-    ///     a list of [file information items](FileInfo) is included. See the `From<&FileInfo>` implementation on [`Bencode`]
-    ///     for more information.
-    /// - [`meta version`](crate::torrent::InfoV2::meta_version), [`file tree`](crate::torrent::InfoV2::file_tree) -
-    ///   always included in a v2 torrent. `meta version` is always set to 2. `file tree` contains the v2 file tree. See
-    ///   the `From<&FileTree>` implementation of [`Bencode`] for more information.
-    ///
-    /// Hybrid torrents contain all of the fields from both of the options above.
-    fn from(info: &'a Info<'a>) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        map.insert(b"name", Self::Bytes(info.name.as_bytes()));
-        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
-        // approaches that size.
-        #[allow(clippy::cast_possible_wrap)]
-        map.insert(b"piece length", Self::Int(info.piece_length.get() as i64));
-
-        if info.private {
-            map.insert(b"private", Self::Int(1));
-        }
-
-        if let Some(source) = &info.source {
-            map.insert(b"source", Self::Bytes(source.as_bytes()));
-        }
-
-        if let Some(v1) = &info.v1 {
-            map.insert(b"pieces", Self::Bytes(v1.pieces.as_flattened()));
-
-            match &v1.file_mode {
-                FileMode::Single { length, md5sum } => {
-                    // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-                    // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
-                    // approaches that size.
-                    #[allow(clippy::cast_possible_wrap)]
-                    map.insert(b"length", Self::Int(*length as i64));
-
-                    if let Some(md5sum) = md5sum {
-                        map.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
-                    }
-                }
-                FileMode::Multi { files } => {
-                    let files = files.iter().map(Bencode::from).collect();
-                    map.insert(b"files", Self::List(files));
-                }
-            }
-        }
-
-        if let Some(v2) = &info.v2 {
-            map.insert(b"meta version", Self::Int(i64::from(v2.meta_version)));
-            map.insert(b"file tree", (&v2.file_tree).into());
-        }
-
-        Self::Dict(map)
-    }
-}
-
-impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
-    /// Serializes a [`FileInfo`] into its bencode representation.
-    ///
-    /// Since [`FileInfo`] represents an entry in the [`files`](FileMode::Multi::files) list,
-    /// it is serialized as a [`Bencode::Dict`] with the fields [`length`](FileInfo::length)
-    /// and [`path`](FileInfo::path). It may also optionally contain the fields [`md5sum`](FileInfo::md5sum)
-    /// and [`attr`](FileInfo::attr). For more information on the latter, see
-    /// [`FileInfoAttr::encoded`](`crate::torrent::FileInfoAttr::encoded`).
-    ///
-    /// Not present in v2-only torrents.
-    fn from(file_info: &'a FileInfo<'a>) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        if let Some(attr) = &file_info.attr {
-            map.insert(b"attr", Self::Bytes(attr.as_bytes()));
-        }
-
-        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
-        // approaches that size.
-        #[allow(clippy::cast_possible_wrap)]
-        map.insert(b"length", Self::Int(file_info.length as i64));
-
-        let path: Vec<Self> = file_info
-            .path
-            .iter()
-            .map(|s| Self::Bytes(s.as_bytes()))
-            .collect();
-        map.insert(b"path", Self::List(path));
-
-        if let Some(md5sum) = &file_info.md5sum {
-            map.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
-        }
-
-        Self::Dict(map)
-    }
-}
-
-impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
-    /// Serializes a [`FileTree`] into its bencode representation, the `file tree` field,
-    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
-    ///
-    /// The output is a [`Bencode::Dict`] that contains one or more trees of path components.
-    /// Each child, represented by [`FileTreeNode`], contains either another [`FileTree`] or
-    /// a [`FileLeaf`] representation. See the `From<&FileTreeNode>` implementation on [`Bencode`]
-    /// for more information.
-    ///
-    /// Not present in v1-only torrents.
-    fn from(tree: &'a FileTree<'a>) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        for (k, v) in &tree.0 {
-            map.insert(k.as_bytes(), v.into());
-        }
-
-        Self::Dict(map)
-    }
-}
-
-impl<'a> From<&'a FileTreeNode<'a>> for Bencode<'a> {
-    /// Serializes a [`FileTreeNode`] inside a [`FileTree`] into its bencode representation
-    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
-    ///
-    /// The output is a [`Bencode::Dict`] whose content depends on the variant of [`FileTreeNode`]:
-    ///
-    /// - **[`FileTreeNode::Directory`]** - all of [`FileTreeNode`] representations in the underlying [`FileTree`].
-    /// - **[`FileTreeNode::File`]** - an entry with an empty key (`b""`) and the representation of the underlying
-    ///   [`FileLeaf`] as the value. The file name is the concatenation of all path components leading to this empty key.
-    ///   See the `From<&FileLeaf>` implementation on [`Bencode`] for more information.
-    ///
-    /// Not present in v1-only torrents.
-    fn from(node: &'a FileTreeNode<'a>) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        match node {
-            FileTreeNode::Directory(file_tree) => {
-                for (k, v) in &file_tree.0 {
-                    map.insert(k.as_bytes(), v.into());
-                }
-            }
-            FileTreeNode::File(file_leaf) => {
-                map.insert(b"", file_leaf.into());
-            }
-        }
-
-        Self::Dict(map)
-    }
-}
-
-impl<'a> From<&'a FileLeaf<'a>> for Bencode<'a> {
-    /// Serializes a [`FileLeaf`] inside a [`FileTreeNode`] into its bencode representation.
-    ///
-    /// The output is a [`Bencode::Dict`] that contains the [`length`](`FileLeaf::length`) field.
-    /// It also contains the [`pieces root`](`FileLeaf::pieces_root`) field if the file is not empty.
-    ///
-    /// Not present in v1-only torrents.
-    fn from(leaf: &'a FileLeaf<'a>) -> Self {
-        let mut map: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-
-        // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
-        // approaches that size.
-        #[allow(clippy::cast_possible_wrap)]
-        map.insert(b"length", Self::Int(leaf.length as i64));
-
-        if let Some(pieces_root) = &leaf.pieces_root {
-            map.insert(b"pieces root", Self::Bytes(pieces_root.as_ref()));
-        }
-
-        Self::Dict(map)
-    }
-}
-
 /// A zero-copy parser for raw bencoded data.
 ///
 /// The parser enforces all bencode rules as described by [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
@@ -619,8 +665,8 @@ impl<'a> Parser<'a> {
             .ok_or(Error::UnexpectedEof)
     }
 
-    /// An internal helper method that tracks the current nesting depth. For more information,
-    /// see [`Parser::parse`].
+    /// An internal parsing method that tracks the current nesting depth. See [`Parser::parse`]
+    /// for more information,
     fn parse_internal(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         if depth > self.max_depth {
             return Err(Error::DepthLimitExceeded);
@@ -692,7 +738,7 @@ impl<'a> Parser<'a> {
     /// current nesting depth.
     fn parse_dict(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         self.cursor += 1;
-        let mut map = BTreeMap::new();
+        let mut dict = BTreeMap::new();
         let mut last_key = None;
 
         while self.peek()? != b'e' {
@@ -709,11 +755,11 @@ impl<'a> Parser<'a> {
             last_key = Some(key);
 
             let value = self.parse_internal(depth + 1)?;
-            map.insert(key, value);
+            dict.insert(key, value);
         }
         self.cursor += 1;
 
-        Ok(Bencode::Dict(map))
+        Ok(Bencode::Dict(dict))
     }
 }
 

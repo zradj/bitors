@@ -16,37 +16,6 @@ const URI_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// Contains the info hash(es) used in [`MagnetLink`].
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum InfoHashes {
-    /// The info hash of a v1-only torrent.
-    V1([u8; 20]),
-    /// The info hash of a v2-only torrent.
-    V2([u8; 32]),
-    /// The v1 and v2 info hashes of a hybrid torrent.
-    Hybrid { v1: [u8; 20], v2: [u8; 32] },
-}
-
-impl InfoHashes {
-    /// Returns the v1 info hash of a v1-only or hybrid torrent. Returns [`None`] if the torrent is v2-only.
-    #[must_use]
-    pub fn v1(&self) -> Option<&[u8; 20]> {
-        match self {
-            Self::V1(v1) | Self::Hybrid { v1, .. } => Some(v1),
-            Self::V2(_) => None,
-        }
-    }
-
-    /// Returns the v2 info hash of a v2-only or hybrid torrent. Returns [`None`] if the torrent is v1-only.
-    #[must_use]
-    pub fn v2(&self) -> Option<&[u8; 32]> {
-        match self {
-            Self::V2(v2) | Self::Hybrid { v2, .. } => Some(v2),
-            Self::V1(_) => None,
-        }
-    }
-}
-
 /// A [magnet link](https://en.wikipedia.org/wiki/Magnet_URI_scheme) representation.
 ///
 /// A magnet link is an [URI](https://en.wikipedia.org/wiki/Uniform_Resource_Identifier) that contains
@@ -81,39 +50,15 @@ pub struct MagnetLink {
     pub v1_base32: bool,
 }
 
-impl MagnetLink {
-    /// Creates a new [`MagnetLink`] with the given hashes directly.
-    #[must_use]
-    pub fn new(info_hashes: InfoHashes) -> Self {
-        Self {
-            info_hashes,
-            name: None,
-            trackers: vec![],
-            size: None,
-            v1_base32: false,
-        }
-    }
-
-    /// Encode the v1 info hash as Base32 instead of Hex.
-    ///
-    /// This is the preferred option by some clients.
-    ///
-    /// No-op if the v1 hash is not present in the magnet link.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use bitors::Torrent;
-    ///
-    /// let torrent = Torrent::builder().add_path("my_file").unwrap().build_v1().unwrap();
-    /// println!("{}", torrent.magnet_link().v1_base32());
-    /// // v1 torrent: magnet:?xt=urn:btih:<32 chars of v1 hash in base32>...
-    /// ```
-    #[must_use]
-    pub fn v1_base32(mut self) -> Self {
-        self.v1_base32 = true;
-        self
-    }
+/// Contains the info hash(es) used in [`MagnetLink`].
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum InfoHashes {
+    /// The info hash of a v1-only torrent.
+    V1([u8; 20]),
+    /// The info hash of a v2-only torrent.
+    V2([u8; 32]),
+    /// The v1 and v2 info hashes of a hybrid torrent.
+    Hybrid { v1: [u8; 20], v2: [u8; 32] },
 }
 
 impl From<&Torrent<'_>> for MagnetLink {
@@ -130,7 +75,7 @@ impl From<&Torrent<'_>> for MagnetLink {
 
         Self {
             info_hashes,
-            name: Some(torrent.info.name.to_string()),
+            name: Some(torrent.name().to_string()),
             trackers,
             size: Some(torrent.total_size()),
             v1_base32: false,
@@ -199,5 +144,60 @@ impl fmt::Display for MagnetLink {
         }
 
         Ok(())
+    }
+}
+
+impl MagnetLink {
+    /// Creates a new [`MagnetLink`] with the given hashes directly.
+    #[must_use]
+    pub fn new(info_hashes: InfoHashes) -> Self {
+        Self {
+            info_hashes,
+            name: None,
+            trackers: vec![],
+            size: None,
+            v1_base32: false,
+        }
+    }
+
+    /// Encode the v1 info hash as Base32 instead of Hex.
+    ///
+    /// This is the preferred option by some clients.
+    ///
+    /// No-op if the v1 hash is not present in the magnet link.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitors::Torrent;
+    ///
+    /// let torrent = Torrent::builder().add_path("my_file").unwrap().build_v1().unwrap();
+    /// println!("{}", torrent.magnet_link().v1_base32());
+    /// // v1 torrent: magnet:?xt=urn:btih:<32 chars of v1 hash in base32>...
+    /// ```
+    #[must_use]
+    pub fn v1_base32(mut self) -> Self {
+        self.v1_base32 = true;
+        self
+    }
+}
+
+impl InfoHashes {
+    /// Returns the v1 info hash of a v1-only or hybrid torrent. Returns [`None`] if the torrent is v2-only.
+    #[must_use]
+    pub fn v1(&self) -> Option<&[u8; 20]> {
+        match self {
+            Self::V1(v1) | Self::Hybrid { v1, .. } => Some(v1),
+            Self::V2(_) => None,
+        }
+    }
+
+    /// Returns the v2 info hash of a v2-only or hybrid torrent. Returns [`None`] if the torrent is v1-only.
+    #[must_use]
+    pub fn v2(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::V2(v2) | Self::Hybrid { v2, .. } => Some(v2),
+            Self::V1(_) => None,
+        }
     }
 }

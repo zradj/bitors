@@ -22,6 +22,89 @@ use crate::{
     torrent::builder::{TorrentBuilder, state::Empty},
 };
 
+pub type TorrentBuf = Torrent<'static>;
+pub type TorrentMetaBuf = TorrentMeta<'static>;
+pub type PieceLayersBuf = PieceLayers<'static>;
+pub type InfoBuf<T> = Info<'static, T>;
+pub type InfoV1Buf = InfoV1<'static>;
+pub type InfoV2Buf = InfoV2<'static>;
+pub type InfoHybridBuf = InfoHybrid<'static>;
+pub type FileModeBuf = FileMode<'static>;
+pub type FileInfoBuf = FileInfo<'static>;
+pub type FileTreeBuf = FileTree<'static>;
+pub type FileTreeNodeBuf = FileTreeNode<'static>;
+pub type FileLeafBuf = FileLeaf<'static>;
+
+fn extract_info_v1_fields<'a>(
+    dict: &mut BTreeMap<&'a [u8], Bencode<'a>>,
+) -> Result<Option<InfoV1<'a>>, Error> {
+    let pieces = match dict.opt(b"pieces") {
+        Some(b) => {
+            let pieces = b.as_bytes()?;
+            let (pieces, []) = pieces.as_chunks() else {
+                return Err(Error::InvalidPiecesLength);
+            };
+            Some(Cow::Borrowed(pieces))
+        }
+        None => None,
+    };
+
+    let file_mode = if let Some(b) = dict.opt(b"files") {
+        let files = b
+            .into_list()?
+            .into_iter()
+            .map(FileInfo::try_from)
+            .collect::<Result<Vec<FileInfo>, _>>()?;
+
+        Some(FileMode::Multi { files })
+    } else if let Some(b) = dict.opt(b"length") {
+        let length = b
+            .as_int()?
+            .try_into()
+            .map_err(|_| Error::IllegalFieldValue("length"))?;
+
+        let md5sum = dict.opt_str(b"md5sum")?.map(Cow::Borrowed);
+
+        Some(FileMode::Single { length, md5sum })
+    } else {
+        None
+    };
+
+    match (pieces, file_mode) {
+        (None, None) => Ok(None),
+        (Some(pieces), Some(file_mode)) => Ok(Some(InfoV1 { pieces, file_mode })),
+        _ => Err(Error::MalformedV1),
+    }
+}
+
+fn extract_info_v2_fields<'a>(
+    dict: &mut BTreeMap<&'a [u8], Bencode<'a>>,
+) -> Result<Option<InfoV2<'a>>, Error> {
+    let has_meta_version = match dict.opt(b"meta version") {
+        Some(b) => {
+            let meta_version = b.as_int()?;
+            if meta_version != 2 {
+                return Err(Error::IllegalFieldValue("meta version"));
+            }
+            true
+        }
+        None => false,
+    };
+
+    let file_tree = dict.opt(b"file tree").map(FileTree::try_from).transpose()?;
+
+    match (has_meta_version, file_tree) {
+        (false, None) => Ok(None),
+        (true, Some(file_tree)) => Ok(Some(InfoV2 { file_tree })),
+        _ => Err(Error::MalformedV2),
+    }
+}
+
+pub trait IntoOwned {
+    type Owned: 'static + IntoOwned;
+    fn into_owned(self) -> Self::Owned;
+}
+
 trait DictExt<'a> {
     fn opt(&mut self, key: &[u8]) -> Option<Bencode<'a>>;
 
@@ -59,22 +142,310 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Torrent<'a> {
-    pub info: Info<'a>,
-
     pub announce: Option<Url>,
-
     pub announce_list: Option<Vec<Vec<Url>>>,
-
     pub url_list: Option<Vec<Url>>,
-
     pub creation_date: Option<u64>,
-
     pub comment: Option<Cow<'a, str>>,
-
     pub created_by: Option<Cow<'a, str>>,
-
     pub encoding: Option<Cow<'a, str>>,
-    pub v2_ext: Option<TorrentV2Ext<'a>>,
+    pub meta: TorrentMeta<'a>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum TorrentMeta<'a> {
+    V1 {
+        info: Info<'a, InfoV1<'a>>,
+    },
+    V2 {
+        info: Info<'a, InfoV2<'a>>,
+        piece_layers: PieceLayers<'a>,
+    },
+    Hybrid {
+        info: Info<'a, InfoHybrid<'a>>,
+        piece_layers: PieceLayers<'a>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Info<'a, T: 'a + IntoOwned> {
+    pub name: Cow<'a, str>,
+    pub piece_length: NonZeroU64,
+    pub private: bool,
+    pub source: Option<Cow<'a, str>>,
+    pub kind: T,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum ParsedInfo<'a> {
+    V1(Info<'a, InfoV1<'a>>),
+    V2(Info<'a, InfoV2<'a>>),
+    Hybrid(Info<'a, InfoHybrid<'a>>),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct InfoV1<'a> {
+    pub pieces: Cow<'a, [[u8; 20]]>,
+    pub file_mode: FileMode<'a>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct InfoV2<'a> {
+    pub file_tree: FileTree<'a>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct InfoHybrid<'a> {
+    pub v1: InfoV1<'a>,
+    pub v2: InfoV2<'a>,
+}
+
+impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
+    type Error = Error;
+
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let mut dict = bencode.into_dict()?;
+
+        let parsed_info = ParsedInfo::try_from(dict.require(b"info")?)?;
+
+        let piece_layers = match dict.opt(b"piece layers") {
+            Some(b) => {
+                let mut piece_layers = BTreeMap::new();
+
+                for (k, v) in b.into_dict()? {
+                    let key = k
+                        .try_into()
+                        .map_err(|_| Error::IllegalFieldValue("piece layers (key)"))?;
+                    let value = v.as_bytes()?;
+                    piece_layers.insert(Cow::Borrowed(key), Cow::Borrowed(value));
+                }
+
+                Some(PieceLayers(piece_layers))
+            }
+            None => None,
+        };
+
+        let meta = match (parsed_info, piece_layers) {
+            (ParsedInfo::V1(info), None) => TorrentMeta::V1 { info },
+            (ParsedInfo::V2(info), Some(piece_layers)) => TorrentMeta::V2 { info, piece_layers },
+            (ParsedInfo::Hybrid(info), Some(piece_layers)) => {
+                TorrentMeta::Hybrid { info, piece_layers }
+            }
+            (ParsedInfo::V1(_), Some(_)) | (ParsedInfo::V2(_) | ParsedInfo::Hybrid(_), None) => {
+                return Err(Error::MalformedV2);
+            }
+        };
+
+        let announce = dict.opt_str(b"announce")?.map(Url::parse).transpose()?;
+
+        let announce_list = dict
+            .opt(b"announce-list")
+            .map(|b| {
+                b.as_list()?
+                    .iter()
+                    .map(|b| {
+                        b.as_list()?
+                            .iter()
+                            .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
+                            .collect::<Result<Vec<Url>, _>>()
+                    })
+                    .collect::<Result<Vec<Vec<Url>>, _>>()
+            })
+            .transpose()?;
+
+        let url_list = dict
+            .opt(b"url-list")
+            .map(|b| {
+                b.as_list()?
+                    .iter()
+                    .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
+                    .collect::<Result<Vec<Url>, _>>()
+            })
+            .transpose()?;
+
+        let creation_date = dict
+            .opt(b"creation date")
+            .map(|b| -> Result<u64, Error> {
+                b.as_int()?
+                    .try_into()
+                    .map_err(|_| Error::IllegalFieldValue("creation date"))
+            })
+            .transpose()?;
+
+        let comment = dict.opt_str(b"comment")?.map(Cow::Borrowed);
+
+        let created_by = dict.opt_str(b"created by")?.map(Cow::Borrowed);
+
+        let encoding = dict.opt_str(b"encoding")?.map(Cow::Borrowed);
+
+        let res = Self {
+            announce,
+            announce_list,
+            url_list,
+            creation_date,
+            comment,
+            created_by,
+            encoding,
+            meta,
+        };
+
+        if res.hybrid_mismatch() {
+            Err(Error::HybridMismatch)
+        } else {
+            Ok(res)
+        }
+    }
+}
+
+impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
+    type Error = Error;
+
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let mut dict = bencode.into_dict()?;
+
+        // --- Extract common fields ---
+        let name = Cow::Borrowed(dict.require_str(b"name")?);
+        let piece_length = dict
+            .require(b"piece length")?
+            .as_int()?
+            .try_into()
+            .ok()
+            .and_then(NonZeroU64::new)
+            .ok_or(Error::IllegalFieldValue("piece length"))?;
+
+        let private = match dict.opt(b"private") {
+            Some(b) => match b.as_int()? {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::IllegalFieldValue("private")),
+            },
+            None => false,
+        };
+        let source = dict.opt_str(b"source")?.map(Cow::Borrowed);
+
+        let v1 = extract_info_v1_fields(&mut dict)?;
+        let v2 = extract_info_v2_fields(&mut dict)?;
+
+        match (v1, v2) {
+            (Some(v1), Some(v2)) => {
+                if !piece_length.is_power_of_two() || piece_length.get() < 16 * 1024 {
+                    return Err(Error::IllegalFieldValue("piece length"));
+                }
+
+                Ok(ParsedInfo::Hybrid(Info {
+                    name,
+                    piece_length,
+                    private,
+                    source,
+                    kind: InfoHybrid { v1, v2 },
+                }))
+            }
+            (Some(v1), None) => Ok(ParsedInfo::V1(Info {
+                name,
+                piece_length,
+                private,
+                source,
+                kind: v1,
+            })),
+            (None, Some(v2)) => {
+                if !piece_length.is_power_of_two() || piece_length.get() < 16 * 1024 {
+                    return Err(Error::IllegalFieldValue("piece length"));
+                }
+
+                Ok(ParsedInfo::V2(Info {
+                    name,
+                    piece_length,
+                    private,
+                    source,
+                    kind: v2,
+                }))
+            }
+            (None, None) => Err(Error::UnrecognizedFormat),
+        }
+    }
+}
+
+impl IntoOwned for Torrent<'_> {
+    type Owned = TorrentBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        TorrentBuf {
+            announce: self.announce,
+            announce_list: self.announce_list,
+            url_list: self.url_list,
+            creation_date: self.creation_date,
+            comment: self.comment.map(|c| Cow::Owned(c.into_owned())),
+            created_by: self.created_by.map(|c| Cow::Owned(c.into_owned())),
+            encoding: self.encoding.map(|c| Cow::Owned(c.into_owned())),
+            meta: self.meta.into_owned(),
+        }
+    }
+}
+
+impl IntoOwned for TorrentMeta<'_> {
+    type Owned = TorrentMetaBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::V1 { info } => TorrentMetaBuf::V1 {
+                info: info.into_owned(),
+            },
+            Self::V2 { info, piece_layers } => TorrentMetaBuf::V2 {
+                info: info.into_owned(),
+                piece_layers: piece_layers.into_owned(),
+            },
+            Self::Hybrid { info, piece_layers } => TorrentMetaBuf::Hybrid {
+                info: info.into_owned(),
+                piece_layers: piece_layers.into_owned(),
+            },
+        }
+    }
+}
+
+impl<T: IntoOwned> IntoOwned for Info<'_, T> {
+    type Owned = InfoBuf<T::Owned>;
+
+    fn into_owned(self) -> Self::Owned {
+        InfoBuf {
+            name: Cow::Owned(self.name.into_owned()),
+            piece_length: self.piece_length,
+            private: self.private,
+            source: self.source.map(|c| Cow::Owned(c.into_owned())),
+            kind: self.kind.into_owned(),
+        }
+    }
+}
+
+impl IntoOwned for InfoV1<'_> {
+    type Owned = InfoV1Buf;
+
+    fn into_owned(self) -> Self::Owned {
+        InfoV1Buf {
+            pieces: Cow::Owned(self.pieces.into_owned()),
+            file_mode: self.file_mode.into_owned(),
+        }
+    }
+}
+
+impl IntoOwned for InfoV2<'_> {
+    type Owned = InfoV2Buf;
+
+    fn into_owned(self) -> Self::Owned {
+        InfoV2Buf {
+            file_tree: self.file_tree.into_owned(),
+        }
+    }
+}
+
+impl IntoOwned for InfoHybrid<'_> {
+    type Owned = InfoHybridBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        InfoHybridBuf {
+            v1: self.v1.into_owned(),
+            v2: self.v2.into_owned(),
+        }
+    }
 }
 
 impl Torrent<'_> {
@@ -85,17 +456,23 @@ impl Torrent<'_> {
 
     #[must_use]
     pub fn is_v1(&self) -> bool {
-        self.info.v1.is_some()
+        matches!(
+            &self.meta,
+            TorrentMeta::V1 { .. } | TorrentMeta::Hybrid { .. }
+        )
     }
 
     #[must_use]
     pub fn is_v2(&self) -> bool {
-        self.info.v2.is_some() && self.v2_ext.is_some()
+        matches!(
+            &self.meta,
+            TorrentMeta::V2 { .. } | TorrentMeta::Hybrid { .. }
+        )
     }
 
     #[must_use]
     pub fn is_hybrid(&self) -> bool {
-        self.is_v1() && self.is_v2()
+        matches!(self.meta, TorrentMeta::Hybrid { .. })
     }
 
     #[must_use]
@@ -109,35 +486,43 @@ impl Torrent<'_> {
 
     #[must_use]
     pub fn info_hash_v1(&self) -> Option<[u8; 20]> {
-        self.info.info_hash_v1()
+        match &self.meta {
+            TorrentMeta::V1 { info } => Some(info.info_hash()),
+            TorrentMeta::Hybrid { info, .. } => Some(info.info_hash_v1()),
+            TorrentMeta::V2 { .. } => None,
+        }
     }
 
     #[must_use]
     pub fn info_hash_v2(&self) -> Option<[u8; 32]> {
-        self.info.info_hash_v2()
+        match &self.meta {
+            TorrentMeta::V2 { info, .. } => Some(info.info_hash()),
+            TorrentMeta::Hybrid { info, .. } => Some(info.info_hash_v2()),
+            TorrentMeta::V1 { .. } => None,
+        }
     }
 
     #[must_use]
     pub fn total_size(&self) -> u64 {
-        match &self.info.v1 {
-            Some(InfoV1 { file_mode, .. }) => match file_mode {
+        match &self.meta {
+            TorrentMeta::V1 { info } => match &info.kind.file_mode {
                 FileMode::Single { length, .. } => *length,
                 FileMode::Multi { files } => files.iter().map(|f| f.length).sum(),
             },
-            #[expect(clippy::missing_panics_doc, reason = "infallible")]
-            None => self.info.v2.as_ref().unwrap().file_tree.total_size(),
+            TorrentMeta::V2 { info, .. } => info.kind.file_tree.total_size(),
+            TorrentMeta::Hybrid { info, .. } => info.kind.v2.file_tree.total_size(),
         }
     }
 
     #[must_use]
     pub fn file_count(&self) -> usize {
-        match &self.info.v1 {
-            Some(InfoV1 { file_mode, .. }) => match file_mode {
+        match &self.meta {
+            TorrentMeta::V1 { info } => match &info.kind.file_mode {
                 FileMode::Single { .. } => 1,
                 FileMode::Multi { files } => files.len(),
             },
-            #[expect(clippy::missing_panics_doc, reason = "infallible")]
-            None => self.info.v2.as_ref().unwrap().file_tree.file_count(),
+            TorrentMeta::V2 { info, .. } => info.kind.file_tree.file_count(),
+            TorrentMeta::Hybrid { info, .. } => info.kind.v2.file_tree.file_count(),
         }
     }
 
@@ -167,356 +552,157 @@ impl Torrent<'_> {
         self.into()
     }
 
-    #[must_use]
-    pub fn into_owned(self) -> TorrentBuf {
-        TorrentBuf {
-            info: self.info.into_owned(),
-            announce: self.announce,
-            announce_list: self.announce_list,
-            url_list: self.url_list,
-            creation_date: self.creation_date,
-            comment: self.comment.map(|c| Cow::Owned(c.into_owned())),
-            created_by: self.created_by.map(|c| Cow::Owned(c.into_owned())),
-            encoding: self.encoding.map(|c| Cow::Owned(c.into_owned())),
-            v2_ext: self.v2_ext.map(TorrentV2Ext::into_owned),
-        }
-    }
-
     fn hybrid_mismatch(&self) -> bool {
-        if !self.is_hybrid() {
-            return false;
-        }
-
-        let file_tree = &self.info.v2.as_ref().unwrap().file_tree;
-
-        match &self.info.v1.as_ref().unwrap().file_mode {
-            FileMode::Single { .. } => {
-                file_tree.file_paths().as_slice() != [Path::new(self.info.name.as_ref())]
-            }
-            FileMode::Multi { files } => {
-                let mut v1_files: Vec<PathBuf> = files
-                    .iter()
-                    .filter(|f| {
-                        !f.attr
-                            .as_ref()
-                            .is_some_and(|a| a.flags.contains(FileInfoAttrFlags::PADDING))
-                    })
-                    .map(FileInfo::full_path)
-                    .collect();
-                v1_files.sort();
-
-                file_tree.file_paths() != v1_files
-            }
-        }
-    }
-}
-
-impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
-    type Error = Error;
-
-    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let mut map = bencode.into_dict()?;
-
-        let info: Info<'_> = map.require(b"info")?.try_into()?;
-
-        let announce = map.opt_str(b"announce")?.map(Url::parse).transpose()?;
-
-        let announce_list = map
-            .opt(b"announce-list")
-            .map(|b| {
-                b.as_list()?
-                    .iter()
-                    .map(|b| {
-                        b.as_list()?
+        match &self.meta {
+            TorrentMeta::Hybrid { info, .. } => {
+                let file_tree = &info.kind.v2.file_tree;
+                match &info.kind.v1.file_mode {
+                    FileMode::Single { .. } => {
+                        file_tree.file_paths().as_slice() != [Path::new(info.name.as_ref())]
+                    }
+                    FileMode::Multi { files } => {
+                        let mut v1_files: Vec<PathBuf> = files
                             .iter()
-                            .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
-                            .collect::<Result<Vec<Url>, _>>()
-                    })
-                    .collect::<Result<Vec<Vec<Url>>, _>>()
-            })
-            .transpose()?;
+                            .filter(|f| {
+                                !f.attr
+                                    .as_ref()
+                                    .is_some_and(|a| a.flags.contains(FileInfoAttrFlags::PADDING))
+                            })
+                            .map(FileInfo::full_path)
+                            .collect();
+                        v1_files.sort();
 
-        let url_list = map
-            .opt(b"url-list")
-            .map(|b| {
-                b.as_list()?
-                    .iter()
-                    .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
-                    .collect::<Result<Vec<Url>, _>>()
-            })
-            .transpose()?;
-
-        let creation_date = map
-            .opt(b"creation date")
-            .map(|b| -> Result<u64, Error> {
-                b.as_int()?
-                    .try_into()
-                    .map_err(|_| Error::IllegalFieldValue("creation date"))
-            })
-            .transpose()?;
-
-        let comment = map.opt_str(b"comment")?.map(Cow::Borrowed);
-
-        let created_by = map.opt_str(b"created by")?.map(Cow::Borrowed);
-
-        let encoding = map.opt_str(b"encoding")?.map(Cow::Borrowed);
-
-        let v2_ext = match map.opt(b"piece layers") {
-            Some(b) => {
-                let mut piece_layers = BTreeMap::new();
-
-                for (k, v) in b.into_dict()? {
-                    let key = k
-                        .try_into()
-                        .map_err(|_| Error::IllegalFieldValue("piece layers (key)"))?;
-                    let value = v.as_bytes()?;
-                    piece_layers.insert(Cow::Borrowed(key), Cow::Borrowed(value));
+                        file_tree.file_paths() != v1_files
+                    }
                 }
-
-                Some(TorrentV2Ext { piece_layers })
             }
-            None => None,
-        };
-
-        let res = Self {
-            info,
-            announce,
-            announce_list,
-            url_list,
-            creation_date,
-            comment,
-            created_by,
-            encoding,
-            v2_ext,
-        };
-
-        if !res.is_v1() && !res.is_v2() {
-            Err(Error::UnrecognizedFormat)
-        } else if res.hybrid_mismatch() {
-            Err(Error::HybridMismatch)
-        } else {
-            Ok(res)
+            _ => false,
         }
     }
 }
 
-pub type TorrentBuf = Torrent<'static>;
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct TorrentV2Ext<'a> {
-    pub piece_layers: BTreeMap<Cow<'a, [u8; 32]>, Cow<'a, [u8]>>,
-}
-
-impl TorrentV2Ext<'_> {
+impl Torrent<'_> {
     #[must_use]
-    pub fn into_owned(self) -> TorrentV2ExtBuf {
-        let mut piece_layers = BTreeMap::new();
-        for (k, v) in self.piece_layers {
-            piece_layers.insert(Cow::Owned(k.into_owned()), Cow::Owned(v.into_owned()));
+    pub fn name(&self) -> &Cow<'_, str> {
+        match &self.meta {
+            TorrentMeta::V1 { info } => &info.name,
+            TorrentMeta::V2 { info, .. } => &info.name,
+            TorrentMeta::Hybrid { info, .. } => &info.name,
         }
-
-        TorrentV2Ext { piece_layers }
     }
-}
 
-pub type TorrentV2ExtBuf = TorrentV2Ext<'static>;
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Info<'a> {
-    pub name: Cow<'a, str>,
-
-    pub piece_length: NonZeroU64,
-
-    pub private: bool,
-
-    pub source: Option<Cow<'a, str>>,
-
-    pub v1: Option<InfoV1<'a>>,
-    pub v2: Option<InfoV2<'a>>,
-}
-
-impl Info<'_> {
-    #[must_use]
-    pub fn info_hash_v1(&self) -> Option<[u8; 20]> {
-        self.v1.as_ref()?;
-        Some(self.info_hash(Sha1::new()).into())
+    pub fn set_name(&mut self, name: &str) {
+        let name = Cow::Owned(name.to_owned());
+        match &mut self.meta {
+            TorrentMeta::V1 { info } => info.name = name,
+            TorrentMeta::V2 { info, .. } => info.name = name,
+            TorrentMeta::Hybrid { info, .. } => info.name = name,
+        }
     }
 
     #[must_use]
-    pub fn info_hash_v2(&self) -> Option<[u8; 32]> {
-        self.v2.as_ref()?;
-        Some(self.info_hash(Sha256::new()).into())
+    pub fn piece_length(&self) -> NonZeroU64 {
+        match &self.meta {
+            TorrentMeta::V1 { info } => info.piece_length,
+            TorrentMeta::V2 { info, .. } => info.piece_length,
+            TorrentMeta::Hybrid { info, .. } => info.piece_length,
+        }
     }
 
+    #[must_use]
+    pub fn private(&self) -> bool {
+        match &self.meta {
+            TorrentMeta::V1 { info } => info.private,
+            TorrentMeta::V2 { info, .. } => info.private,
+            TorrentMeta::Hybrid { info, .. } => info.private,
+        }
+    }
+
+    pub fn set_private(&mut self, private: bool) {
+        match &mut self.meta {
+            TorrentMeta::V1 { info } => info.private = private,
+            TorrentMeta::V2 { info, .. } => info.private = private,
+            TorrentMeta::Hybrid { info, .. } => info.private = private,
+        }
+    }
+
+    #[must_use]
+    pub fn source(&self) -> Option<&Cow<'_, str>> {
+        match &self.meta {
+            TorrentMeta::V1 { info } => info.source.as_ref(),
+            TorrentMeta::V2 { info, .. } => info.source.as_ref(),
+            TorrentMeta::Hybrid { info, .. } => info.source.as_ref(),
+        }
+    }
+
+    pub fn set_source(&mut self, source: &str) {
+        let source = Some(Cow::Owned(source.to_owned()));
+        match &mut self.meta {
+            TorrentMeta::V1 { info } => info.source = source,
+            TorrentMeta::V2 { info, .. } => info.source = source,
+            TorrentMeta::Hybrid { info, .. } => info.source = source,
+        }
+    }
+}
+
+impl<T: IntoOwned> Info<'_, T> {
+    fn info_hash_internal<D: Digest + Update>(
+        hash_func: D,
+        encoded_info: &Bencode<'_>,
+    ) -> Output<D> {
+        let mut hasher = digest_io::IoWrapper(hash_func);
+        let _ = encoded_info.encode_to_writer(&mut hasher);
+        hasher.0.finalize()
+    }
+}
+
+impl Info<'_, InfoV1<'_>> {
     #[must_use]
     pub fn to_bencode(&self) -> Bencode<'_> {
         self.into()
     }
 
     #[must_use]
-    pub fn into_owned(self) -> InfoBuf {
-        InfoBuf {
-            name: Cow::Owned(self.name.into_owned()),
-            piece_length: self.piece_length,
-            private: self.private,
-            source: self.source.map(|c| Cow::Owned(c.into_owned())),
-            v1: self.v1.map(InfoV1::into_owned),
-            v2: self.v2.map(InfoV2::into_owned),
-        }
-    }
-
-    fn info_hash<D: Digest + Update>(&self, hash_func: D) -> Output<D> {
-        let mut hasher = digest_io::IoWrapper(hash_func);
-        let _ = self.to_bencode().encode_to_writer(&mut hasher);
-        hasher.0.finalize()
+    pub fn info_hash(&self) -> [u8; 20] {
+        Self::info_hash_internal(Sha1::new(), &self.to_bencode()).into()
     }
 }
 
-impl<'a> TryFrom<Bencode<'a>> for Info<'a> {
-    type Error = Error;
-
-    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let mut map = bencode.into_dict()?;
-
-        // --- Extract common fields ---
-        let name = map.require_str(b"name")?;
-        let piece_length = map
-            .require(b"piece length")?
-            .as_int()?
-            .try_into()
-            .ok()
-            .and_then(NonZeroU64::new)
-            .ok_or(Error::IllegalFieldValue("piece length"))?;
-
-        let private = match map.opt(b"private") {
-            Some(b) => match b.as_int()? {
-                0 => false,
-                1 => true,
-                _ => return Err(Error::IllegalFieldValue("private")),
-            },
-            None => false,
-        };
-        let source = map.opt_str(b"source")?.map(Cow::Borrowed);
-
-        // --- Extract v1 fields ---
-        let pieces = match map.opt(b"pieces") {
-            Some(b) => {
-                let pieces = b.as_bytes()?;
-                let (pieces, []) = pieces.as_chunks() else {
-                    return Err(Error::InvalidPiecesLength);
-                };
-                Some(Cow::Borrowed(pieces))
-            }
-            None => None,
-        };
-
-        let file_mode = if let Some(b) = map.opt(b"files") {
-            let files = b
-                .into_list()?
-                .into_iter()
-                .map(FileInfo::try_from)
-                .collect::<Result<Vec<FileInfo>, _>>()?;
-
-            Some(FileMode::Multi { files })
-        } else if let Some(b) = map.opt(b"length") {
-            let length = b
-                .as_int()?
-                .try_into()
-                .map_err(|_| Error::IllegalFieldValue("length"))?;
-
-            let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
-
-            Some(FileMode::Single { length, md5sum })
-        } else {
-            None
-        };
-
-        let v1 = match (pieces, file_mode) {
-            (None, None) => None,
-            (Some(pieces), Some(file_mode)) => Some(InfoV1 { pieces, file_mode }),
-            _ => return Err(Error::MalformedV1),
-        };
-
-        // --- Extract v2 fields ---
-        let meta_version = match map.opt(b"meta version") {
-            Some(b) => {
-                let meta_version = b
-                    .as_int()?
-                    .try_into()
-                    .map_err(|_| Error::IllegalFieldValue("meta version"))?;
-
-                if meta_version != 2 {
-                    return Err(Error::IllegalFieldValue("meta version"));
-                }
-
-                Some(meta_version)
-            }
-            None => None,
-        };
-
-        let file_tree = map.opt(b"file tree").map(FileTree::try_from).transpose()?;
-
-        let v2 = match (meta_version, file_tree) {
-            (None, None) => None,
-            (Some(meta_version), Some(file_tree)) => Some(InfoV2 {
-                meta_version,
-                file_tree,
-            }),
-            _ => return Err(Error::MalformedV2),
-        };
-
-        if v2.is_some() && !piece_length.is_power_of_two() {
-            Err(Error::IllegalFieldValue("piece length"))
-        } else {
-            Ok(Self {
-                name: Cow::Borrowed(name),
-                piece_length,
-                private,
-                source,
-                v1,
-                v2,
-            })
-        }
-    }
-}
-
-pub type InfoBuf = Info<'static>;
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct InfoV1<'a> {
-    pub pieces: Cow<'a, [[u8; 20]]>,
-    pub file_mode: FileMode<'a>,
-}
-
-impl InfoV1<'_> {
+impl Info<'_, InfoV2<'_>> {
     #[must_use]
-    pub fn into_owned(self) -> InfoV1Buf {
-        InfoV1Buf {
-            pieces: Cow::Owned(self.pieces.into_owned()),
-            file_mode: self.file_mode.into_owned(),
-        }
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
+
+    #[must_use]
+    pub fn info_hash(&self) -> [u8; 32] {
+        Self::info_hash_internal(Sha256::new(), &self.to_bencode()).into()
     }
 }
 
-pub type InfoV1Buf = InfoV1<'static>;
+impl Info<'_, InfoHybrid<'_>> {
+    #[must_use]
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct InfoV2<'a> {
-    pub meta_version: u8,
-    pub file_tree: FileTree<'a>,
+    #[must_use]
+    pub fn info_hash_v1(&self) -> [u8; 20] {
+        Self::info_hash_internal(Sha1::new(), &self.to_bencode()).into()
+    }
+
+    #[must_use]
+    pub fn info_hash_v2(&self) -> [u8; 32] {
+        Self::info_hash_internal(Sha256::new(), &self.to_bencode()).into()
+    }
 }
 
 impl InfoV2<'_> {
-    #[must_use]
-    pub fn into_owned(self) -> InfoV2Buf {
-        InfoV2Buf {
-            meta_version: self.meta_version,
-            file_tree: self.file_tree.into_owned(),
-        }
-    }
+    pub const META_VERSION: u8 = 2;
 }
 
-pub type InfoV2Buf = InfoV2<'static>;
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct PieceLayers<'a>(pub BTreeMap<Cow<'a, [u8; 32]>, Cow<'a, [u8]>>);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum FileMode<'a> {
@@ -531,88 +717,11 @@ pub enum FileMode<'a> {
     },
 }
 
-impl FileMode<'_> {
-    #[must_use]
-    pub fn is_single(&self) -> bool {
-        matches!(self, Self::Single { .. })
-    }
-
-    #[must_use]
-    pub fn is_multi(&self) -> bool {
-        !self.is_single()
-    }
-
-    #[must_use]
-    pub fn into_owned(self) -> FileModeBuf {
-        match self {
-            Self::Single { length, md5sum } => FileModeBuf::Single {
-                length,
-                md5sum: md5sum.map(|c| Cow::Owned(c.into_owned())),
-            },
-            Self::Multi { files } => FileModeBuf::Multi {
-                files: files.into_iter().map(FileInfo::into_owned).collect(),
-            },
-        }
-    }
-}
-
-pub type FileModeBuf = FileMode<'static>;
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct FileInfoAttr {
-    pub flags: FileInfoAttrFlags,
-    pub encoded: [u8; 4],
-    pub len: usize,
-}
-
-impl FileInfoAttr {
-    #[must_use]
-    pub fn new(flags: FileInfoAttrFlags) -> Self {
-        let mut encoded = [0u8; 4];
-        let mut len = 0;
-
-        for flag in flags.iter() {
-            encoded[len] = match flag {
-                FileInfoAttrFlags::SYMLINK => b'l',
-                FileInfoAttrFlags::EXEC => b'x',
-                FileInfoAttrFlags::HIDDEN => b'h',
-                FileInfoAttrFlags::PADDING => b'p',
-                _ => unreachable!(),
-            };
-            len += 1;
-        }
-
-        Self {
-            flags,
-            encoded,
-            len,
-        }
-    }
-
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.encoded[..self.len]
-    }
-}
-
-impl<'a> TryFrom<Bencode<'a>> for FileInfoAttr {
-    type Error = Error;
-
-    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let mut flags = FileInfoAttrFlags::empty();
-
-        for &c in bencode.as_bytes()? {
-            match c {
-                b'l' => flags.insert(FileInfoAttrFlags::SYMLINK),
-                b'x' => flags.insert(FileInfoAttrFlags::EXEC),
-                b'h' => flags.insert(FileInfoAttrFlags::HIDDEN),
-                b'p' => flags.insert(FileInfoAttrFlags::PADDING),
-                _ => return Err(Error::IllegalFieldValue("attr")),
-            }
-        }
-
-        Ok(Self::new(flags))
-    }
+    flags: FileInfoAttrFlags,
+    encoded: [u8; 4],
+    len: usize,
 }
 
 bitflags! {
@@ -636,33 +745,38 @@ pub struct FileInfo<'a> {
     pub path: Vec<Cow<'a, str>>,
 }
 
-impl FileInfo<'_> {
-    #[must_use]
-    pub fn full_path(&self) -> PathBuf {
-        let mut full_path = PathBuf::new();
-        self.path
-            .iter()
-            .for_each(|comp| full_path.push(comp.to_string()));
-        full_path
-    }
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct FileTree<'a>(pub BTreeMap<Cow<'a, str>, FileTreeNode<'a>>);
 
-    #[must_use]
-    pub fn to_bencode(&self) -> Bencode<'_> {
-        self.into()
-    }
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum FileTreeNode<'a> {
+    Directory(FileTree<'a>),
+    File(FileLeaf<'a>),
+}
 
-    #[must_use]
-    pub fn into_owned(self) -> FileInfoBuf {
-        FileInfoBuf {
-            attr: self.attr,
-            length: self.length,
-            md5sum: self.md5sum.map(|c| Cow::Owned(c.into_owned())),
-            path: self
-                .path
-                .into_iter()
-                .map(|c| Cow::Owned(c.into_owned()))
-                .collect(),
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct FileLeaf<'a> {
+    pub length: u64,
+    pub pieces_root: Option<Cow<'a, [u8; 32]>>,
+}
+
+impl<'a> TryFrom<Bencode<'a>> for FileInfoAttr {
+    type Error = Error;
+
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let mut flags = FileInfoAttrFlags::empty();
+
+        for &c in bencode.as_bytes()? {
+            match c {
+                b'l' => flags.insert(FileInfoAttrFlags::SYMLINK),
+                b'x' => flags.insert(FileInfoAttrFlags::EXEC),
+                b'h' => flags.insert(FileInfoAttrFlags::HIDDEN),
+                b'p' => flags.insert(FileInfoAttrFlags::PADDING),
+                _ => return Err(Error::IllegalFieldValue("attr")),
+            }
         }
+
+        Ok(Self::new(flags))
     }
 }
 
@@ -670,19 +784,19 @@ impl<'a> TryFrom<Bencode<'a>> for FileInfo<'a> {
     type Error = Error;
 
     fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let mut map = bencode.into_dict()?;
+        let mut dict = bencode.into_dict()?;
 
-        let attr = map.opt(b"attr").map(FileInfoAttr::try_from).transpose()?;
+        let attr = dict.opt(b"attr").map(FileInfoAttr::try_from).transpose()?;
 
-        let length = map
+        let length = dict
             .require(b"length")?
             .as_int()?
             .try_into()
             .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-        let md5sum = map.opt_str(b"md5sum")?.map(Cow::Borrowed);
+        let md5sum = dict.opt_str(b"md5sum")?.map(Cow::Borrowed);
 
-        let path = map
+        let path = dict
             .require(b"path")?
             .as_list()?
             .iter()
@@ -698,10 +812,201 @@ impl<'a> TryFrom<Bencode<'a>> for FileInfo<'a> {
     }
 }
 
-pub type FileInfoBuf = FileInfo<'static>;
+impl<'a> TryFrom<Bencode<'a>> for FileTree<'a> {
+    type Error = Error;
 
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
-pub struct FileTree<'a>(pub BTreeMap<Cow<'a, str>, FileTreeNode<'a>>);
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let dict = bencode.into_dict()?;
+        let mut res = BTreeMap::new();
+
+        for (key, value) in dict {
+            let key = std::str::from_utf8(key)?;
+
+            let node = if key.is_empty() {
+                FileTreeNode::File(FileLeaf::try_from(value)?)
+            } else {
+                FileTreeNode::Directory(Self::try_from(value)?)
+            };
+
+            res.insert(Cow::Borrowed(key), node);
+        }
+
+        Ok(Self(res))
+    }
+}
+
+impl<'a> TryFrom<Bencode<'a>> for FileLeaf<'a> {
+    type Error = Error;
+
+    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
+        let dict = bencode.into_dict()?;
+
+        let length: u64 = dict
+            .get(b"length".as_slice())
+            .ok_or(Error::MissingField("length".to_string()))?
+            .as_int()?
+            .try_into()
+            .map_err(|_| Error::IllegalFieldValue("length"))?;
+        let pieces_root = dict.get(b"pieces root".as_slice());
+
+        match (length, pieces_root) {
+            (0, None) => Ok(Self {
+                length: 0,
+                pieces_root: None,
+            }),
+            (1.., Some(b)) => {
+                let pieces_root = b
+                    .as_bytes()?
+                    .try_into()
+                    .map_err(|_| Error::IllegalFieldValue("pieces root"))?;
+                Ok(Self {
+                    length,
+                    pieces_root: Some(Cow::Borrowed(pieces_root)),
+                })
+            }
+            _ => Err(Error::InvalidFileTree),
+        }
+    }
+}
+
+impl IntoOwned for PieceLayers<'_> {
+    type Owned = PieceLayersBuf;
+
+    fn into_owned(self) -> PieceLayersBuf {
+        PieceLayers(
+            self.0
+                .into_iter()
+                .map(|(k, v)| (Cow::Owned(k.into_owned()), Cow::Owned(v.into_owned())))
+                .collect(),
+        )
+    }
+}
+
+impl IntoOwned for FileMode<'_> {
+    type Owned = FileModeBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::Single { length, md5sum } => FileModeBuf::Single {
+                length,
+                md5sum: md5sum.map(|c| Cow::Owned(c.into_owned())),
+            },
+            Self::Multi { files } => FileModeBuf::Multi {
+                files: files.into_iter().map(FileInfo::into_owned).collect(),
+            },
+        }
+    }
+}
+
+impl IntoOwned for FileInfo<'_> {
+    type Owned = FileInfoBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        FileInfoBuf {
+            attr: self.attr,
+            length: self.length,
+            md5sum: self.md5sum.map(|c| Cow::Owned(c.into_owned())),
+            path: self
+                .path
+                .into_iter()
+                .map(|c| Cow::Owned(c.into_owned()))
+                .collect(),
+        }
+    }
+}
+
+impl IntoOwned for FileTree<'_> {
+    type Owned = FileTreeBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        FileTree(
+            self.0
+                .into_iter()
+                .map(|(k, v)| (Cow::Owned(k.into_owned()), v.into_owned()))
+                .collect(),
+        )
+    }
+}
+
+impl IntoOwned for FileTreeNode<'_> {
+    type Owned = FileTreeNodeBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::Directory(dir) => FileTreeNodeBuf::Directory(dir.into_owned()),
+            Self::File(file) => FileTreeNodeBuf::File(file.into_owned()),
+        }
+    }
+}
+
+impl IntoOwned for FileLeaf<'_> {
+    type Owned = FileLeafBuf;
+
+    fn into_owned(self) -> Self::Owned {
+        FileLeafBuf {
+            length: self.length,
+            pieces_root: self.pieces_root.map(|c| Cow::Owned(c.into_owned())),
+        }
+    }
+}
+
+impl FileMode<'_> {
+    #[must_use]
+    pub fn is_single(&self) -> bool {
+        matches!(self, Self::Single { .. })
+    }
+
+    #[must_use]
+    pub fn is_multi(&self) -> bool {
+        !self.is_single()
+    }
+}
+
+impl FileInfoAttr {
+    #[must_use]
+    pub fn new(flags: FileInfoAttrFlags) -> Self {
+        let mut encoded = [0u8; 4];
+        let mut len = 0;
+
+        for (_, flag) in flags.iter_names() {
+            encoded[len] = match flag {
+                FileInfoAttrFlags::SYMLINK => b'l',
+                FileInfoAttrFlags::EXEC => b'x',
+                FileInfoAttrFlags::HIDDEN => b'h',
+                FileInfoAttrFlags::PADDING => b'p',
+                _ => unreachable!(),
+            };
+            len += 1;
+        }
+
+        Self {
+            flags,
+            encoded,
+            len,
+        }
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.encoded[..self.len]
+    }
+}
+
+impl FileInfo<'_> {
+    #[must_use]
+    pub fn full_path(&self) -> PathBuf {
+        let mut full_path = PathBuf::new();
+        self.path
+            .iter()
+            .for_each(|comp| full_path.push(comp.to_string()));
+        full_path
+    }
+
+    #[must_use]
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        self.into()
+    }
+}
 
 impl FileTree<'_> {
     #[must_use]
@@ -733,17 +1038,6 @@ impl FileTree<'_> {
             .sum()
     }
 
-    #[must_use]
-    pub fn into_owned(self) -> FileTreeBuf {
-        let mut res = BTreeMap::new();
-
-        for (k, v) in self.0 {
-            res.insert(Cow::Owned(k.into_owned()), v.into_owned());
-        }
-
-        FileTree(res)
-    }
-
     fn collect_paths(&self, prefix: &Path, res: &mut Vec<PathBuf>) {
         for (key, node) in &self.0 {
             let path = prefix.join(key.as_ref());
@@ -754,101 +1048,6 @@ impl FileTree<'_> {
         }
     }
 }
-
-impl<'a> TryFrom<Bencode<'a>> for FileTree<'a> {
-    type Error = Error;
-
-    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let map = bencode.into_dict()?;
-        let mut res = BTreeMap::new();
-
-        for (key, value) in map {
-            let key = std::str::from_utf8(key)?;
-
-            let node = if key.is_empty() {
-                FileTreeNode::File(FileLeaf::try_from(value)?)
-            } else {
-                FileTreeNode::Directory(Self::try_from(value)?)
-            };
-
-            res.insert(Cow::Borrowed(key), node);
-        }
-
-        Ok(Self(res))
-    }
-}
-
-pub type FileTreeBuf = FileTree<'static>;
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum FileTreeNode<'a> {
-    Directory(FileTree<'a>),
-    File(FileLeaf<'a>),
-}
-
-impl FileTreeNode<'_> {
-    #[must_use]
-    pub fn into_owned(self) -> FileTreeNodeBuf {
-        match self {
-            Self::Directory(dir) => FileTreeNodeBuf::Directory(dir.into_owned()),
-            Self::File(file) => FileTreeNodeBuf::File(file.into_owned()),
-        }
-    }
-}
-
-pub type FileTreeNodeBuf = FileTreeNode<'static>;
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct FileLeaf<'a> {
-    pub length: u64,
-    pub pieces_root: Option<Cow<'a, [u8; 32]>>,
-}
-
-impl FileLeaf<'_> {
-    #[must_use]
-    pub fn into_owned(self) -> FileLeafBuf {
-        FileLeafBuf {
-            length: self.length,
-            pieces_root: self.pieces_root.map(|c| Cow::Owned(c.into_owned())),
-        }
-    }
-}
-
-impl<'a> TryFrom<Bencode<'a>> for FileLeaf<'a> {
-    type Error = Error;
-
-    fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let map = bencode.into_dict()?;
-
-        let length: u64 = map
-            .get(b"length".as_slice())
-            .ok_or(Error::MissingField("length".to_string()))?
-            .as_int()?
-            .try_into()
-            .map_err(|_| Error::IllegalFieldValue("length"))?;
-        let pieces_root = map.get(b"pieces root".as_slice());
-
-        match (length, pieces_root) {
-            (0, None) => Ok(Self {
-                length: 0,
-                pieces_root: None,
-            }),
-            (1.., Some(b)) => {
-                let pieces_root = b
-                    .as_bytes()?
-                    .try_into()
-                    .map_err(|_| Error::IllegalFieldValue("pieces root"))?;
-                Ok(Self {
-                    length,
-                    pieces_root: Some(Cow::Borrowed(pieces_root)),
-                })
-            }
-            _ => Err(Error::InvalidFileTree),
-        }
-    }
-}
-
-pub type FileLeafBuf = FileLeaf<'static>;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -869,6 +1068,9 @@ pub enum Error {
 
     #[error("Illegal value in field '{0}'")]
     IllegalFieldValue(&'static str),
+
+    #[error("Piece length must be a power of two and at least 16 KiB in BitTorrent v2: {0}")]
+    IllegalPieceLengthV2(NonZeroU64),
 
     #[error("Length of the 'pieces' list must be a multiple of 20")]
     InvalidPiecesLength,
