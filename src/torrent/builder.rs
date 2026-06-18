@@ -617,7 +617,11 @@ mod utils {
             }
         }
 
-        Ok(files)
+        if files.is_empty() {
+            Err(Error::NoFiles)
+        } else {
+            Ok(files)
+        }
     }
 
     pub(super) fn resolve_name(
@@ -855,7 +859,6 @@ pub struct TorrentBuilder<State> {
     filters: Vec<FilterFn>,
     name: Option<String>,
     common_fields: CommonFields,
-    single_file: bool,
     follow_symlinks: bool,
     _state: PhantomData<State>,
 }
@@ -974,7 +977,6 @@ impl<T> TorrentBuilder<T> {
             filters: self.filters,
             name: self.name,
             common_fields: self.common_fields,
-            single_file: self.single_file,
             follow_symlinks: self.follow_symlinks,
             _state: PhantomData,
         }
@@ -1006,7 +1008,6 @@ impl TorrentBuilder<state::Empty> {
                 created_by: None,
                 comment: None,
             },
-            single_file: false,
             follow_symlinks: false,
             _state: PhantomData,
         }
@@ -1048,6 +1049,7 @@ impl TorrentBuilder<state::HasPaths> {
 
     pub fn build_v1(self) -> Result<TorrentBuf, Error> {
         let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
+        let single_file = files.len() == 1;
         let common_fields = common_fields(self.common_fields, &files);
 
         files.sort();
@@ -1056,10 +1058,10 @@ impl TorrentBuilder<state::HasPaths> {
         let v1 = v1_fields(
             &files,
             piece_length_usize(common_fields.piece_length)?,
-            self.single_file,
+            single_file,
         )?;
 
-        let name = resolve_name(self.name, &files, self.single_file, &common_prefix)?;
+        let name = resolve_name(self.name, &files, single_file, &common_prefix)?;
 
         Ok(torrent_from_parts(
             name,
@@ -1072,6 +1074,7 @@ impl TorrentBuilder<state::HasPaths> {
 
     pub fn build_v2(self) -> Result<TorrentBuf, Error> {
         let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
+        let single_file = files.len() == 1;
         let common_fields = common_fields(self.common_fields, &files);
 
         if !common_fields.piece_length.is_power_of_two()
@@ -1086,7 +1089,7 @@ impl TorrentBuilder<state::HasPaths> {
 
         let (v2, v2_ext) = v2_fields(&files, piece_length_usize(common_fields.piece_length)?)?;
 
-        let name = resolve_name(self.name, &files, self.single_file, &common_prefix)?;
+        let name = resolve_name(self.name, &files, single_file, &common_prefix)?;
 
         Ok(torrent_from_parts(
             name,
@@ -1099,6 +1102,7 @@ impl TorrentBuilder<state::HasPaths> {
 
     pub fn build_hybrid(self) -> Result<TorrentBuf, Error> {
         let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
+        let single_file = files.len() == 1;
         let common_fields = common_fields(self.common_fields, &files);
 
         if !common_fields.piece_length.is_power_of_two()
@@ -1114,10 +1118,10 @@ impl TorrentBuilder<state::HasPaths> {
         let (v1, v2, v2_ext) = hybrid_fields(
             &files,
             piece_length_usize(common_fields.piece_length)?,
-            self.single_file,
+            single_file,
         )?;
 
-        let name = resolve_name(self.name, &files, self.single_file, &common_prefix)?;
+        let name = resolve_name(self.name, &files, single_file, &common_prefix)?;
 
         Ok(torrent_from_parts(
             name,
