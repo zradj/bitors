@@ -133,7 +133,7 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
 
         match &torrent.meta {
             TorrentMeta::V1 { info } => {
-                dict.insert(b"info", info.to_bencode());
+                dict.insert(b"info", info.into());
             }
             TorrentMeta::V2 { info, piece_layers } => {
                 dict.insert(b"info", info.into());
@@ -145,32 +145,32 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
             }
         }
 
-        if let Some(url) = &torrent.announce {
-            dict.insert(b"announce", Self::Bytes(url.as_str().as_bytes()));
+        if let Some(tracker) = &torrent.tracker {
+            dict.insert(b"announce", Self::Bytes(tracker.as_str().as_bytes()));
         }
 
-        if let Some(announce_list) = &torrent.announce_list {
-            let announce_list = announce_list
+        if let Some(tracker_tiers) = &torrent.tracker_tiers {
+            let tracker_tiers = tracker_tiers
                 .iter()
-                .map(|v| {
-                    let urls = v
+                .map(|tier| {
+                    let tier_trackers = tier
                         .iter()
-                        .map(|url| Self::Bytes(url.as_str().as_bytes()))
+                        .map(|tracker| Self::Bytes(tracker.as_str().as_bytes()))
                         .collect();
-                    Self::List(urls)
+                    Self::List(tier_trackers)
                 })
                 .collect();
 
-            dict.insert(b"announce-list", Self::List(announce_list));
+            dict.insert(b"announce-list", Self::List(tracker_tiers));
         }
 
-        if let Some(url_list) = &torrent.url_list {
-            let url_list = url_list
+        if let Some(web_seeds) = &torrent.web_seeds {
+            let web_seeds = web_seeds
                 .iter()
-                .map(|url| Self::Bytes(url.as_str().as_bytes()))
+                .map(|seed| Self::Bytes(seed.as_str().as_bytes()))
                 .collect();
 
-            dict.insert(b"url-list", Self::List(url_list));
+            dict.insert(b"url-list", Self::List(web_seeds));
         }
 
         if let Some(creation_date) = torrent.creation_date {
@@ -660,9 +660,8 @@ impl<'a> Parser<'a> {
     /// Peeks at a slice of the given length at the current position in the data.
     /// Returns [`Error::UnexpectedEof`] if there is none.
     fn peek_slice(&self, len: usize) -> Result<&'a [u8], Error> {
-        self.data
-            .get(self.cursor..self.cursor + len)
-            .ok_or(Error::UnexpectedEof)
+        let end = self.cursor.checked_add(len).ok_or(Error::UnexpectedEof)?;
+        self.data.get(self.cursor..end).ok_or(Error::UnexpectedEof)
     }
 
     /// An internal parsing method that tracks the current nesting depth. See [`Parser::parse`]

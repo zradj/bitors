@@ -1,9 +1,11 @@
 use std::{error::Error, fs::File};
 
 use bitors::TorrentBuilder;
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let torrent = TorrentBuilder::from_path("/home/zaur/Telegram")?.build_hybrid()?;
+    let torrent = TorrentBuilder::from_path("/home/zaur/projects")?.build_hybrid()?;
 
     let mut file = File::create("new.torrent")?;
     torrent.to_bencode().encode_to_writer(&mut file)?;

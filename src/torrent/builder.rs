@@ -2,14 +2,12 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     fs::File,
-    io::{self, BufReader, Read, Repeat, Take},
     marker::PhantomData,
     num::NonZeroU64,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use memmap2::Mmap;
 use path_clean::clean;
 use rayon::prelude::*;
 use sha1::{Digest, Sha1};
@@ -21,7 +19,7 @@ use walkdir::WalkDir;
 use crate::torrent::{
     FileInfo, FileInfoAttr, FileInfoAttrFlags, FileLeaf, FileMode, FileTree, FileTreeNode, Info,
     InfoHybrid, InfoV1, InfoV1Buf, InfoV2, InfoV2Buf, PieceLayers, PieceLayersBuf, Torrent,
-    TorrentBuf, TorrentMeta,
+    TorrentBuf, TorrentMeta, TrackerTier,
     builder::{
         field_builders::{common_fields, hybrid_fields, v1_fields, v2_fields},
         hashing::V2FileHashes,
@@ -47,13 +45,16 @@ pub mod state {
 }
 
 mod hashing {
-    use crate::torrent::builder::utils::{FileEntry, V1ChunkIterator};
+
+    use crate::torrent::builder::utils::{FileEntry, FileManager};
     use rayon::prelude::*;
 
     use super::{
-        Digest, Error, File, Mmap, ParallelIterator, ParallelSlice, Sha1, Sha256, V2_BLOCK_SIZE,
+        Digest, Error, ParallelIterator, ParallelSlice, Sha1, Sha256, V2_BLOCK_SIZE,
         V2_BLOCK_SIZE_U64,
     };
+
+    static ZEROS: [u8; 64 * 1024] = [0; 64 * 1024];
 
     #[derive(Debug)]
     pub(super) struct V1PieceHashes(pub(super) Vec<[u8; 20]>);
@@ -70,32 +71,93 @@ mod hashing {
         },
     }
 
+    #[derive(Debug, Clone)]
+    struct V1ChunkPlan {
+        file_index: usize,
+        offset: usize,
+        length: usize,
+        padding: bool,
+    }
+
     pub(super) fn v1_piece_hashes(
         files: &[FileEntry],
         piece_length: usize,
+        file_manager: &FileManager,
     ) -> Result<V1PieceHashes, Error> {
-        let chunk_iter = V1ChunkIterator::new(files, piece_length);
+        let total_length: u64 = files.iter().map(|f| f.length).sum();
+        if total_length == 0 {
+            return Ok(V1PieceHashes(Vec::new()));
+        }
 
-        let mut indexed_hashes = chunk_iter
-            .par_bridge()
-            .map(|res| {
-                res.map(|(index, chunk)| {
-                    let mut sha1 = Sha1::new();
-                    sha1.update(&chunk);
-                    (index, sha1.finalize().into())
-                })
+        let num_pieces: usize = total_length
+            .div_ceil(piece_length as u64)
+            .try_into()
+            .map_err(|_| Error::PieceLengthTooSmall(piece_length))?;
+        let mut piece_plans: Vec<Vec<V1ChunkPlan>> = vec![Vec::new(); num_pieces];
+
+        let mut current_piece = 0;
+        let mut current_piece_offset = 0;
+
+        for (i, file) in files.iter().enumerate() {
+            let mut file_remaining =
+                usize::try_from(file.length).map_err(|_| Error::FileTooLarge(file.length))?;
+            let mut file_offset: usize = 0;
+
+            while file_remaining > 0 {
+                let space_in_piece = piece_length - current_piece_offset;
+                let take = file_remaining.min(space_in_piece);
+
+                piece_plans[current_piece].push(V1ChunkPlan {
+                    file_index: i,
+                    offset: file_offset,
+                    length: take,
+                    padding: file.padding,
+                });
+                file_manager.register_use(i);
+
+                file_remaining -= take;
+                file_offset += take;
+                current_piece_offset += take;
+
+                if current_piece_offset == piece_length {
+                    current_piece += 1;
+                    current_piece_offset = 0;
+                }
+            }
+        }
+
+        let hashes = piece_plans
+            .into_par_iter()
+            .map_init(Sha1::new, |sha1, plan| {
+                for chunk in plan {
+                    if chunk.padding {
+                        let mut remaining = chunk.length;
+                        while remaining > 0 {
+                            let take = remaining.min(64 * 1024);
+                            sha1.update(&ZEROS[..take]);
+                            remaining -= take;
+                        }
+                    } else {
+                        let mmap = file_manager.acquire(chunk.file_index)?;
+
+                        let start = chunk.offset;
+                        let end = start + chunk.length;
+
+                        sha1.update(&mmap[start..end]);
+                    }
+                }
+                Ok::<[u8; 20], Error>(sha1.finalize_reset().into())
             })
-            .collect::<Result<Vec<(usize, [u8; 20])>, _>>()?;
+            .collect::<Result<Vec<[u8; 20]>, _>>()?;
 
-        indexed_hashes.sort_by_key(|(index, _)| *index);
-
-        let hashes = indexed_hashes.into_iter().map(|(_, h)| h).collect();
         Ok(V1PieceHashes(hashes))
     }
 
     pub(super) fn v2_file_hashes(
         file: &FileEntry,
         piece_length: usize,
+        file_manager: &FileManager,
+        fm_idx: usize,
     ) -> Result<V2FileHashes, Error> {
         debug_assert!(piece_length.is_power_of_two());
         debug_assert!(piece_length >= V2_BLOCK_SIZE);
@@ -104,80 +166,114 @@ mod hashing {
             return Ok(V2FileHashes::Empty);
         }
 
-        let padded_length = file.length.max(V2_BLOCK_SIZE_U64).next_power_of_two();
-        let reader = File::open(&file.disk_path)?;
+        let padded_length: usize = file
+            .length
+            .max(V2_BLOCK_SIZE_U64)
+            .next_power_of_two()
+            .try_into()
+            .map_err(|_| Error::FileTooLarge(file.length))?;
 
-        let mmap = unsafe { Mmap::map(&reader)? };
+        let chunk_size = piece_length.min(padded_length);
+        let target_depth = (chunk_size / V2_BLOCK_SIZE).ilog2();
 
-        let leaves = mmap
-            .par_chunks(V2_BLOCK_SIZE)
-            .map_init(Sha256::new, |sha256, chunk| {
-                sha256.update(chunk);
-                sha256.finalize_reset().into()
+        let mmap = file_manager.acquire(fm_idx)?;
+
+        let real_piece_roots: Vec<[u8; 32]> = mmap
+            .par_chunks(chunk_size)
+            .map_init(Sha256::new, |hasher, chunk| {
+                compute_piece_root(chunk, target_depth, hasher)
             })
             .collect();
 
-        Ok(v2_merkle_tree(
-            leaves,
-            file.length,
-            padded_length,
-            piece_length,
-        ))
+        let num_padded_pieces = padded_length / chunk_size;
+        let mut layer = real_piece_roots.clone();
+
+        if layer.len() < num_padded_pieces {
+            let pad_hash = empty_tree_hash(target_depth);
+            layer.resize(num_padded_pieces, pad_hash);
+        }
+
+        while layer.len() > 1 {
+            layer = layer
+                .chunks_exact(2)
+                .map(|chunk| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(chunk[0]);
+                    hasher.update(chunk[1]);
+                    hasher.finalize().into()
+                })
+                .collect();
+        }
+
+        let root_hash = layer[0];
+
+        if file.length > piece_length as u64 {
+            Ok(V2FileHashes::MultiPiece {
+                root: root_hash,
+                layer: real_piece_roots,
+            })
+        } else {
+            Ok(V2FileHashes::SinglePiece { root: root_hash })
+        }
     }
 
-    pub(super) fn v2_merkle_tree(
-        mut leaves: Vec<[u8; 32]>,
-        file_length: u64,
-        padded_length: u64,
-        piece_length: usize,
-    ) -> V2FileHashes {
-        let mut sha256 = Sha256::new();
-        let num_leaves = (padded_length / V2_BLOCK_SIZE_U64) as usize;
-        let target_depth = (piece_length / V2_BLOCK_SIZE).ilog2();
-        let mut piece_layer = None;
+    fn compute_piece_root(chunk: &[u8], target_depth: u32, hasher: &mut Sha256) -> [u8; 32] {
+        let blocks_per_chunk = 1 << target_depth;
 
-        // Zero-hash leaves to balance the tree (per BEP 52)
-        leaves.resize(num_leaves, [0u8; 32]);
+        let mut stack = [([0u8; 32], 0); 32];
+        let mut stack_ptr = 0;
 
-        let mut layer_width = num_leaves / 2;
-        let mut depth = 0;
+        for i in 0..blocks_per_chunk {
+            let start = i * V2_BLOCK_SIZE;
 
-        let mut prev_layer = leaves;
-        while layer_width > 0 {
-            if depth == target_depth && file_length > (piece_length as u64) {
-                let num_real_pieces = usize::try_from(file_length.div_ceil(piece_length as u64))
-                    .expect("32-bit targets cannot open files this big");
-                piece_layer = Some(prev_layer[..num_real_pieces].to_vec());
+            let leaf = if start < chunk.len() {
+                let end = (start + V2_BLOCK_SIZE).min(chunk.len());
+                hasher.update(&chunk[start..end]);
+                hasher.finalize_reset().into()
+            } else {
+                [0u8; 32]
+            };
+
+            let mut current = leaf;
+            let mut height = 0;
+
+            while stack_ptr > 0 && stack[stack_ptr - 1].1 == height {
+                stack_ptr -= 1;
+                let prev = stack[stack_ptr].0;
+
+                hasher.update(prev);
+                hasher.update(current);
+                current = hasher.finalize_reset().into();
+
+                height += 1;
             }
 
-            let mut layer = Vec::with_capacity(layer_width);
-
-            for chunk in prev_layer.chunks_exact(2) {
-                sha256.update(chunk[0]);
-                sha256.update(chunk[1]);
-                layer.push(sha256.finalize_reset().into());
-            }
-
-            depth += 1;
-            prev_layer = layer;
-            layer_width /= 2;
+            stack[stack_ptr] = (current, height);
+            stack_ptr += 1;
         }
 
-        let [root_hash] = prev_layer.as_slice() else {
-            unreachable!("Merkle tree reduction must yield exactly one root");
-        };
+        debug_assert_eq!(stack_ptr, 1, "Stack did not cleanly reduce to 1 root");
+        stack[0].0
+    }
 
-        match (root_hash, piece_layer) {
-            (&root, None) => V2FileHashes::SinglePiece { root },
-            (&root, Some(layer)) => V2FileHashes::MultiPiece { root, layer },
+    fn empty_tree_hash(depth: u32) -> [u8; 32] {
+        let mut hash = [0u8; 32];
+        for _ in 0..depth {
+            let mut hasher = Sha256::new();
+            hasher.update(hash);
+            hasher.update(hash);
+            hash = hasher.finalize().into();
         }
+        hash
     }
 }
 
 mod field_builders {
+    use rayon::iter::IndexedParallelIterator;
+
     use crate::torrent::builder::{
         hashing::{v1_piece_hashes, v2_file_hashes},
-        utils::{CommonFields, CommonFieldsResolved, FileEntry},
+        utils::{CommonFields, CommonFieldsResolved, FileEntry, FileManager},
     };
 
     use super::{
@@ -192,9 +288,11 @@ mod field_builders {
         piece_length: usize,
         single_file: bool,
     ) -> Result<InfoV1Buf, Error> {
+        let file_manager = FileManager::new(files);
+
         let file_infos = v1_file_infos(files)?;
 
-        let piece_hashes = v1_piece_hashes(files, piece_length)?;
+        let piece_hashes = v1_piece_hashes(files, piece_length, &file_manager)?;
 
         let file_mode = match (file_infos.len(), single_file) {
             (0, _) => unreachable!("TorrentFactory<HasFiles> does not allow an empty file vector"),
@@ -215,9 +313,15 @@ mod field_builders {
         files: &[FileEntry],
         piece_length: usize,
     ) -> Result<(InfoV2Buf, PieceLayersBuf), Error> {
+        let file_manager = FileManager::new(files);
+        for i in 0..files.len() {
+            file_manager.register_use(i);
+        }
+
         let hashes_list = files
             .par_iter()
-            .map(|f| v2_file_hashes(f, piece_length))
+            .enumerate()
+            .map(|(i, file)| v2_file_hashes(file, piece_length, &file_manager, i))
             .collect::<Result<Vec<_>, _>>()?;
         let (file_tree, piece_layers_entries) = v2_file_tree_and_piece_layers(files, hashes_list);
 
@@ -225,10 +329,7 @@ mod field_builders {
             let mut res = BTreeMap::new();
 
             for (hash, layer) in piece_layers_entries {
-                res.insert(
-                    Cow::Owned(hash),
-                    Cow::Owned(layer.as_slice().as_flattened().to_vec()),
-                );
+                res.insert(Cow::Owned(hash), Cow::Owned(layer.into_flattened()));
             }
 
             res
@@ -243,15 +344,13 @@ mod field_builders {
         piece_length: usize,
         single_file: bool,
     ) -> Result<(InfoV1Buf, InfoV2Buf, PieceLayersBuf), Error> {
-        let v2_hashes_list = files
-            .par_iter()
-            .map(|file| v2_file_hashes(file, piece_length))
-            .collect::<Result<Vec<_>, _>>()?;
-
         let mut files_pad = Vec::with_capacity(files.len());
+        let mut v1_to_v2_ids = Vec::with_capacity(files.len());
         for file in files {
-            let pad_len = file.length.next_multiple_of(piece_length as u64) - file.length;
+            v1_to_v2_ids.push(files_pad.len());
             files_pad.push(file.clone());
+
+            let pad_len = file.length.next_multiple_of(piece_length as u64) - file.length;
             if pad_len > 0 {
                 files_pad.push(FileEntry {
                     disk_path: PathBuf::new(),
@@ -261,11 +360,32 @@ mod field_builders {
                 });
             }
         }
+        let single_file = single_file && (files_pad.len() == files.len());
 
-        let v1_piece_hashes = v1_piece_hashes(&files_pad, piece_length)?;
+        let file_manager = FileManager::new(&files_pad);
+        for &pad_idx in &v1_to_v2_ids {
+            if files_pad[pad_idx].length > 0 {
+                file_manager.register_use(pad_idx);
+            }
+        }
+
+        let (v2_hashes_list_res, v1_piece_hashes_res) = rayon::join(
+            || {
+                files
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, file)| {
+                        let pad_idx = v1_to_v2_ids[i];
+                        v2_file_hashes(file, piece_length, &file_manager, pad_idx)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            },
+            || v1_piece_hashes(&files_pad, piece_length, &file_manager),
+        );
+        let v2_hashes_list = v2_hashes_list_res?;
+        let v1_piece_hashes = v1_piece_hashes_res?;
 
         let file_infos = v1_file_infos(&files_pad)?;
-
         let file_mode = match (file_infos.len(), single_file) {
             (0, _) => unreachable!("TorrentFactory<HasFiles> does not allow an empty file vector"),
             (1, true) => FileMode::Single {
@@ -277,7 +397,6 @@ mod field_builders {
 
         let (file_tree, piece_layers_entries) =
             v2_file_tree_and_piece_layers(files, v2_hashes_list);
-
         let piece_layers = {
             let mut res = BTreeMap::new();
 
@@ -319,36 +438,36 @@ mod field_builders {
                 .unwrap_or(0)
         });
 
-        let announce = common_fields
-            .announce_list
+        let tracker = common_fields
+            .tracker_tiers
             .first()
             .and_then(|tier| tier.first().cloned());
 
-        let announce_list = common_fields
-            .announce_list
+        let tracker_tiers = common_fields
+            .tracker_tiers
             .into_iter()
             .filter(|tier| !tier.is_empty())
             .collect::<Vec<_>>();
 
-        let announce_list = if announce_list.is_empty() {
+        let tracker_tiers = if tracker_tiers.is_empty() {
             None
         } else {
-            Some(announce_list)
+            Some(tracker_tiers)
         };
 
-        let url_list = if common_fields.url_list.is_empty() {
+        let web_seeds = if common_fields.web_seeds.is_empty() {
             None
         } else {
-            Some(common_fields.url_list)
+            Some(common_fields.web_seeds)
         };
 
         CommonFieldsResolved {
             piece_length,
             private: common_fields.private,
             source: common_fields.source.map(Cow::Owned),
-            announce,
-            announce_list,
-            url_list,
+            tracker,
+            tracker_tiers,
+            web_seeds,
             creation_date: Some(creation_date),
             created_by: common_fields.created_by.map(Cow::Owned),
             comment: common_fields.comment.map(Cow::Owned),
@@ -431,7 +550,7 @@ mod field_builders {
                 .expect("UTF-8 correctness has already been checked")
                 .to_string();
 
-            let (pieces_root, maybe_layer) = match file_hashes {
+            let (pieces_root, layer_opt) = match file_hashes {
                 V2FileHashes::Empty => (None, None),
                 V2FileHashes::SinglePiece { root } => (Some(Cow::Owned(root)), None),
                 V2FileHashes::MultiPiece { root, layer } => {
@@ -447,7 +566,7 @@ mod field_builders {
                 }),
             );
 
-            if let Some(layer_entry) = maybe_layer {
+            if let Some(layer_entry) = layer_opt {
                 piece_layers.push(layer_entry);
             }
         }
@@ -457,10 +576,18 @@ mod field_builders {
 }
 
 mod utils {
+    use std::{
+        ops::Deref,
+        sync::{Arc, Mutex},
+    };
+
+    use memmap2::{Mmap, MmapOptions};
+
+    use crate::torrent::TrackerTier;
+
     use super::{
-        BufReader, Cow, Error, File, Info, InfoHybrid, InfoV1Buf, InfoV2Buf, NonZeroU64, Path,
-        PathBuf, PieceLayersBuf, Read, Repeat, Take, Torrent, TorrentBuf, TorrentMeta, Url, clean,
-        io,
+        Cow, Error, File, Info, InfoHybrid, InfoV1Buf, InfoV2Buf, NonZeroU64, Path, PathBuf,
+        PieceLayersBuf, Torrent, TorrentBuf, TorrentMeta, Url, clean,
     };
 
     pub(super) fn piece_length_usize(piece_length: NonZeroU64) -> Result<usize, Error> {
@@ -584,9 +711,9 @@ mod utils {
         };
 
         Torrent {
-            announce: common_fields.announce,
-            announce_list: common_fields.announce_list,
-            url_list: common_fields.url_list,
+            tracker: common_fields.tracker,
+            tracker_tiers: common_fields.tracker_tiers,
+            web_seeds: common_fields.web_seeds,
             creation_date: common_fields.creation_date,
             comment: common_fields.comment,
             created_by: common_fields.created_by,
@@ -595,7 +722,7 @@ mod utils {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub(super) struct FileEntry {
         pub(super) disk_path: PathBuf,
         pub(super) meta_path: PathBuf,
@@ -608,8 +735,8 @@ mod utils {
         pub(super) piece_length: Option<NonZeroU64>,
         pub(super) private: bool,
         pub(super) source: Option<String>,
-        pub(super) announce_list: Vec<Vec<Url>>,
-        pub(super) url_list: Vec<Url>,
+        pub(super) tracker_tiers: Vec<TrackerTier>,
+        pub(super) web_seeds: Vec<Url>,
         pub(super) creation_date: Option<u64>,
         pub(super) created_by: Option<String>,
         pub(super) comment: Option<String>,
@@ -620,9 +747,9 @@ mod utils {
         pub(super) piece_length: NonZeroU64,
         pub(super) private: bool,
         pub(super) source: Option<Cow<'static, str>>,
-        pub(super) announce: Option<Url>,
-        pub(super) announce_list: Option<Vec<Vec<Url>>>,
-        pub(super) url_list: Option<Vec<Url>>,
+        pub(super) tracker: Option<Url>,
+        pub(super) tracker_tiers: Option<Vec<TrackerTier>>,
+        pub(super) web_seeds: Option<Vec<Url>>,
         pub(super) creation_date: Option<u64>,
         pub(super) created_by: Option<Cow<'static, str>>,
         pub(super) comment: Option<Cow<'static, str>>,
@@ -630,105 +757,71 @@ mod utils {
     }
 
     #[derive(Debug)]
-    pub(super) enum V1Reader {
-        Disk(BufReader<File>),
-        Padding(Take<Repeat>),
-    }
-
-    #[derive(Debug)]
-    pub(super) struct V1ChunkIterator<'a> {
+    pub(super) struct FileManager<'a> {
         files: &'a [FileEntry],
-        piece_length: usize,
-        file_idx: usize,
-        reader: Option<V1Reader>,
-        piece_idx: usize,
+        states: Vec<Mutex<FileState>>,
     }
 
-    impl Read for V1Reader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            match self {
-                Self::Disk(r) => r.read(buf),
-                Self::Padding(r) => r.read(buf),
+    #[derive(Debug, Default)]
+    pub(super) struct FileState {
+        uses: usize,
+        mmap: Option<Arc<Mmap>>,
+    }
+
+    pub(super) struct MmapGuard<'a> {
+        mmap: Arc<Mmap>,
+        state: &'a Mutex<FileState>,
+    }
+
+    impl Deref for MmapGuard<'_> {
+        type Target = [u8];
+        fn deref(&self) -> &Self::Target {
+            &self.mmap
+        }
+    }
+
+    impl Drop for MmapGuard<'_> {
+        fn drop(&mut self) {
+            let mut state = self.state.lock().unwrap();
+            state.uses -= 1;
+            if state.uses == 0 {
+                state.mmap = None;
             }
         }
     }
 
-    impl<'a> V1ChunkIterator<'a> {
-        pub(super) fn new(files: &'a [FileEntry], piece_length: usize) -> Self {
-            Self {
-                files,
-                piece_length,
-                file_idx: 0,
-                reader: None,
-                piece_idx: 0,
+    impl<'a> FileManager<'a> {
+        pub fn new(files: &'a [FileEntry]) -> Self {
+            let mut states = Vec::with_capacity(files.len());
+            for _ in 0..files.len() {
+                states.push(Mutex::new(FileState::default()));
             }
+            Self { files, states }
         }
 
-        fn open_reader(&self, idx: usize) -> Result<V1Reader, Error> {
-            let entry = &self.files[idx];
-            if entry.padding {
-                Ok(V1Reader::Padding(io::repeat(0).take(entry.length)))
-            } else {
-                let f = File::open(&entry.disk_path)?;
-                Ok(V1Reader::Disk(BufReader::with_capacity(
-                    self.piece_length,
-                    f,
-                )))
-            }
+        pub fn register_use(&self, file_index: usize) {
+            let mut state = self.states[file_index].lock().unwrap();
+            state.uses += 1;
         }
-    }
 
-    impl Iterator for V1ChunkIterator<'_> {
-        type Item = Result<(usize, Vec<u8>), Error>;
+        pub fn acquire(&self, file_index: usize) -> Result<MmapGuard<'_>, Error> {
+            let mut state = self.states[file_index].lock().unwrap();
 
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.reader.is_none() {
-                if self.file_idx >= self.files.len() {
-                    return None;
-                }
-                match self.open_reader(self.file_idx) {
-                    Ok(r) => self.reader = Some(r),
-                    Err(e) => return Some(Err(e)),
-                }
+            if state.mmap.is_none() {
+                let file_entry = &self.files[file_index];
+                let len = usize::try_from(file_entry.length)
+                    .map_err(|_| Error::FileTooLarge(file_entry.length))?;
+                let f = File::open(&file_entry.disk_path)?;
+                let mmap = unsafe { MmapOptions::new().len(len).map(&f)? };
+                state.mmap = Some(Arc::new(mmap));
             }
 
-            let mut chunk = vec![0u8; self.piece_length];
-            let mut total = 0;
+            let mmap = state.mmap.as_ref().unwrap().clone();
 
-            loop {
-                let reader_ref = self.reader.as_mut().unwrap();
-                match reader_ref.read(&mut chunk[total..]) {
-                    Ok(0) => {
-                        self.file_idx += 1;
-                        if self.file_idx >= self.files.len() {
-                            self.reader = None;
-                            break;
-                        }
-                        match self.open_reader(self.file_idx) {
-                            Ok(r) => self.reader = Some(r),
-                            Err(e) => return Some(Err(e)),
-                        }
-                    }
-                    Ok(n) => {
-                        total += n;
-                        if total == self.piece_length {
-                            break;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
-                    Err(e) => return Some(Err(e.into())),
-                }
-            }
-
-            if total == 0 {
-                return None;
-            }
-
-            chunk.truncate(total);
-            let current_idx = self.piece_idx;
-            self.piece_idx += 1;
-
-            Some(Ok((current_idx, chunk)))
+            Ok(MmapGuard {
+                mmap,
+                state: &self.states[file_index],
+            })
         }
     }
 }
@@ -788,42 +881,42 @@ impl<T> TorrentBuilder<T> {
     }
 
     #[must_use]
-    pub fn add_announce_url(mut self, announce_url: Url) -> Self {
-        self.last_announce_tier_mut().push(announce_url);
+    pub fn add_tracker(mut self, tracker: Url) -> Self {
+        self.last_tracker_tier_mut().0.push(tracker);
         self
     }
 
     #[must_use]
-    pub fn add_announce_urls<I: IntoIterator<Item = Url>>(mut self, announce_urls: I) -> Self {
-        self.last_announce_tier_mut().extend(announce_urls);
+    pub fn add_trackers<I: IntoIterator<Item = Url>>(mut self, trackers: I) -> Self {
+        self.last_tracker_tier_mut().0.extend(trackers);
         self
     }
 
     #[must_use]
-    pub fn next_announce_tier(mut self) -> Self {
-        if !self.last_announce_tier_mut().is_empty() {
-            self.common_fields.announce_list.push(vec![]);
+    pub fn next_tracker_tier(mut self) -> Self {
+        if !self.last_tracker_tier_mut().is_empty() {
+            self.common_fields.tracker_tiers.push(TrackerTier::default());
         }
         self
     }
 
     #[must_use]
-    pub fn add_url(mut self, url: Url) -> Self {
-        self.common_fields.url_list.push(url);
+    pub fn add_web_seed(mut self, seed: Url) -> Self {
+        self.common_fields.web_seeds.push(seed);
         self
     }
 
     #[must_use]
-    pub fn add_urls<I: IntoIterator<Item = Url>>(mut self, urls: I) -> Self {
-        self.common_fields.url_list.extend(urls);
+    pub fn add_web_seeds<I: IntoIterator<Item = Url>>(mut self, seeds: I) -> Self {
+        self.common_fields.web_seeds.extend(seeds);
         self
     }
 
-    fn last_announce_tier_mut(&mut self) -> &mut Vec<Url> {
-        if self.common_fields.announce_list.is_empty() {
-            self.common_fields.announce_list.push(vec![]);
+    fn last_tracker_tier_mut(&mut self) -> &mut TrackerTier {
+        if self.common_fields.tracker_tiers.is_empty() {
+            self.common_fields.tracker_tiers.push(TrackerTier::default());
         }
-        self.common_fields.announce_list.last_mut().unwrap()
+        self.common_fields.tracker_tiers.last_mut().unwrap()
     }
 
     fn add_path_internal(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
@@ -840,10 +933,9 @@ impl<T> TorrentBuilder<T> {
                     .into_iter()
                     .filter_map(Result::ok)
                     .filter(|e| e.file_type().is_file())
-                    .map(walkdir::DirEntry::into_path)
-                    .map(|p| -> Result<(PathBuf, u64), Error> {
-                        let len = p.metadata()?.len();
-                        Ok((p, len))
+                    .map(|e| -> Result<(PathBuf, u64), Error> {
+                        let len = e.metadata()?.len();
+                        Ok((e.into_path(), len))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -889,8 +981,8 @@ impl TorrentBuilder<state::Empty> {
                 piece_length: None,
                 private: false,
                 source: None,
-                announce_list: vec![],
-                url_list: vec![],
+                tracker_tiers: vec![],
+                web_seeds: vec![],
                 creation_date: None,
                 created_by: None,
                 comment: None,
@@ -1046,6 +1138,9 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Error while walking a directory: {0}")]
+    WalkDir(#[from] walkdir::Error),
+
     #[error("No files were provided to the factory")]
     NoFiles,
 
@@ -1054,6 +1149,14 @@ pub enum Error {
 
     #[error("Unsupported file type: {0}")]
     UnsupportedFileType(PathBuf),
+
+    #[error("file length {0} is too large for the platform address space")]
+    FileTooLarge(u64),
+
+    #[error(
+        "Files cannot be processed with the given piece length in this platform address space: {0}"
+    )]
+    PieceLengthTooSmall(usize),
 
     #[error("Piece length must be a power of two and at least 16 KiB in BitTorrent v2: {0}")]
     InvalidPieceLengthV2(NonZeroU64),

@@ -1,18 +1,19 @@
 pub mod builder;
 
-use std::{
-    borrow::Cow,
-    collections::BTreeMap,
-    num::NonZeroU64,
-    path::{Path, PathBuf},
-};
-
 use bitflags::bitflags;
+use rand::seq::SliceRandom;
 use sha1::{
     Digest, Sha1,
     digest::{Output, Update},
 };
 use sha2::Sha256;
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    num::NonZeroU64,
+    ops::Deref,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use url::Url;
 
@@ -142,9 +143,9 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Torrent<'a> {
-    pub announce: Option<Url>,
-    pub announce_list: Option<Vec<Vec<Url>>>,
-    pub url_list: Option<Vec<Url>>,
+    pub tracker: Option<Url>,
+    pub tracker_tiers: Option<Vec<TrackerTier>>,
+    pub web_seeds: Option<Vec<Url>>,
     pub creation_date: Option<u64>,
     pub comment: Option<Cow<'a, str>>,
     pub created_by: Option<Cow<'a, str>>,
@@ -236,24 +237,26 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
             }
         };
 
-        let announce = dict.opt_str(b"announce")?.map(Url::parse).transpose()?;
+        let tracker = dict.opt_str(b"announce")?.map(Url::parse).transpose()?;
 
-        let announce_list = dict
+        let tracker_tiers = dict
             .opt(b"announce-list")
             .map(|b| {
                 b.as_list()?
                     .iter()
-                    .map(|b| {
-                        b.as_list()?
+                    .map(|b| -> Result<TrackerTier, Error> {
+                        let tracker_tier = b
+                            .as_list()?
                             .iter()
                             .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
-                            .collect::<Result<Vec<Url>, _>>()
+                            .collect::<Result<Vec<Url>, _>>()?;
+                        Ok(TrackerTier(tracker_tier))
                     })
-                    .collect::<Result<Vec<Vec<Url>>, _>>()
+                    .collect::<Result<Vec<TrackerTier>, _>>()
             })
             .transpose()?;
 
-        let url_list = dict
+        let web_seeds = dict
             .opt(b"url-list")
             .map(|b| {
                 b.as_list()?
@@ -279,9 +282,9 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
         let encoding = dict.opt_str(b"encoding")?.map(Cow::Borrowed);
 
         let res = Self {
-            announce,
-            announce_list,
-            url_list,
+            tracker,
+            tracker_tiers,
+            web_seeds,
             creation_date,
             comment,
             created_by,
@@ -370,9 +373,9 @@ impl IntoOwned for Torrent<'_> {
 
     fn into_owned(self) -> Self::Owned {
         TorrentBuf {
-            announce: self.announce,
-            announce_list: self.announce_list,
-            url_list: self.url_list,
+            tracker: self.tracker,
+            tracker_tiers: self.tracker_tiers,
+            web_seeds: self.web_seeds,
             creation_date: self.creation_date,
             comment: self.comment.map(|c| Cow::Owned(c.into_owned())),
             created_by: self.created_by.map(|c| Cow::Owned(c.into_owned())),
@@ -477,7 +480,7 @@ impl Torrent<'_> {
 
     #[must_use]
     pub fn trackers(&self) -> Vec<Vec<&Url>> {
-        match (&self.announce, &self.announce_list) {
+        match (&self.tracker, &self.tracker_tiers) {
             (Some(url), None) => vec![vec![url]],
             (_, Some(tiers)) => tiers.iter().map(|tier| tier.iter().collect()).collect(),
             (None, None) => vec![],
@@ -701,6 +704,9 @@ impl InfoV2<'_> {
     pub const META_VERSION: u8 = 2;
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
+pub struct TrackerTier(pub Vec<Url>);
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PieceLayers<'a>(pub BTreeMap<Cow<'a, [u8; 32]>, Cow<'a, [u8]>>);
 
@@ -869,6 +875,13 @@ impl<'a> TryFrom<Bencode<'a>> for FileLeaf<'a> {
     }
 }
 
+impl Deref for TrackerTier {
+    type Target = [Url];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl IntoOwned for PieceLayers<'_> {
     type Owned = PieceLayersBuf;
 
@@ -947,6 +960,15 @@ impl IntoOwned for FileLeaf<'_> {
             length: self.length,
             pieces_root: self.pieces_root.map(|c| Cow::Owned(c.into_owned())),
         }
+    }
+}
+
+impl TrackerTier {
+    #[must_use]
+    pub fn get_shuffled(&self) -> Vec<Url> {
+        let mut tier = self.0.clone();
+        tier.shuffle(&mut rand::rng());
+        tier
     }
 }
 
