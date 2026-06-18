@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
     fs::File,
     marker::PhantomData,
     num::NonZeroU64,
@@ -14,7 +13,6 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
-use walkdir::WalkDir;
 
 use crate::torrent::{
     FileInfo, FileInfoAttr, FileInfoAttrFlags, FileLeaf, FileMode, FileTree, FileTreeNode, Info,
@@ -23,10 +21,10 @@ use crate::torrent::{
     builder::{
         field_builders::{common_fields, hybrid_fields, v1_fields, v2_fields},
         hashing::V2FileHashes,
-        state::HasFiles,
+        state::HasPaths,
         utils::{
-            CommonFields, piece_length_usize, remove_common_prefix, resolve_name,
-            torrent_from_parts,
+            CommonFields, piece_length_usize, remove_common_prefix, resolve_file_paths,
+            resolve_name, torrent_from_parts,
         },
     },
 };
@@ -36,16 +34,14 @@ const V2_BLOCK_SIZE: usize = 16 * 1024;
 const V2_BLOCK_SIZE_U64: u64 = V2_BLOCK_SIZE as u64;
 
 pub mod state {
-
     #[derive(Debug)]
     pub struct Empty;
 
     #[derive(Debug)]
-    pub struct HasFiles;
+    pub struct HasPaths;
 }
 
 mod hashing {
-
     use crate::torrent::builder::utils::{FileEntry, FileManager};
     use rayon::prelude::*;
 
@@ -561,8 +557,9 @@ mod utils {
     };
 
     use memmap2::{Mmap, MmapOptions};
+    use walkdir::WalkDir;
 
-    use crate::torrent::TrackerTier;
+    use crate::torrent::{TrackerTier, builder::FilterFn};
 
     use super::{
         Cow, Error, File, Info, InfoHybrid, InfoV1Buf, InfoV2Buf, NonZeroU64, Path, PathBuf,
@@ -574,6 +571,53 @@ mod utils {
             .get()
             .try_into()
             .map_err(|_| Error::PieceLengthTooLarge(piece_length))
+    }
+
+    pub(super) fn resolve_file_paths(
+        paths: Vec<PathBuf>,
+        filters: &[FilterFn],
+        follow_symlinks: bool,
+    ) -> Result<Vec<(PathBuf, u64)>, Error> {
+        let mut files = Vec::with_capacity(paths.len());
+
+        for path in paths {
+            match path.metadata()? {
+                m if m.is_file() => {
+                    if filters.iter().all(|filter| filter(&path)) {
+                        files.push((path, m.len()));
+                    }
+                }
+                m if m.is_dir() => {
+                    let new_files = WalkDir::new(&path)
+                        .follow_links(follow_symlinks)
+                        .into_iter()
+                        .filter_entry(|entry| {
+                            let path = entry.path();
+                            filters.iter().all(|filter| filter(path))
+                        })
+                        .filter_map(|entry| {
+                            let entry = match entry {
+                                Ok(e) => e,
+                                Err(e) => return Some(Err(Error::from(e))),
+                            };
+                            if !entry.file_type().is_file() {
+                                return None;
+                            }
+                            let result = entry
+                                .metadata()
+                                .map_err(Error::from)
+                                .map(|m| (entry.into_path(), m.len()));
+                            Some(result)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    files.extend(new_files);
+                }
+                _ => return Err(Error::UnsupportedFileType(path)),
+            }
+        }
+
+        Ok(files)
     }
 
     pub(super) fn resolve_name(
@@ -804,9 +848,11 @@ mod utils {
     }
 }
 
-#[derive(Debug)]
+pub type FilterFn = Box<dyn Fn(&Path) -> bool + Send + Sync>;
+
 pub struct TorrentBuilder<State> {
-    files: Vec<(PathBuf, u64)>,
+    paths: Vec<PathBuf>,
+    filters: Vec<FilterFn>,
     name: Option<String>,
     common_fields: CommonFields,
     single_file: bool,
@@ -894,6 +940,20 @@ impl<T> TorrentBuilder<T> {
     }
 
     #[must_use]
+    pub fn add_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&Path) -> bool + Send + Sync + 'static,
+    {
+        self.filters.push(Box::new(filter));
+        self
+    }
+
+    pub fn add_path(mut self, path: impl Into<PathBuf>) -> TorrentBuilder<HasPaths> {
+        self.paths.push(path.into());
+        self.into_state()
+    }
+
+    #[must_use]
     pub fn follow_symlinks(mut self, follow_symlinks: bool) -> Self {
         self.follow_symlinks = follow_symlinks;
         self
@@ -908,50 +968,10 @@ impl<T> TorrentBuilder<T> {
         self.common_fields.tracker_tiers.last_mut().unwrap()
     }
 
-    fn add_path_internal(&mut self, path: impl Into<PathBuf>) -> Result<(), Error> {
-        let path = path.into();
-
-        match path.metadata()? {
-            m if m.is_file() => {
-                self.files.push((path, m.len()));
-                self.single_file = self.files.len() == 1;
-            }
-            m if m.is_dir() => {
-                let files = WalkDir::new(&path)
-                    .follow_links(self.follow_symlinks)
-                    .into_iter()
-                    .filter_map(|entry| {
-                        let entry = match entry {
-                            Ok(e) => e,
-                            Err(e) => return Some(Err(Error::from(e))),
-                        };
-                        if !entry.file_type().is_file() {
-                            return None;
-                        }
-                        let result = entry
-                            .metadata()
-                            .map_err(Error::from)
-                            .map(|m| (entry.into_path(), m.len()));
-                        Some(result)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-
-                if files.is_empty() {
-                    return Err(Error::NoFiles);
-                }
-
-                self.files.extend(files);
-                self.single_file = false;
-            }
-            _ => return Err(Error::UnsupportedFileType(path)),
-        }
-
-        Ok(())
-    }
-
     fn into_state<S>(self) -> TorrentBuilder<S> {
         TorrentBuilder {
-            files: self.files,
+            paths: self.paths,
+            filters: self.filters,
             name: self.name,
             common_fields: self.common_fields,
             single_file: self.single_file,
@@ -973,7 +993,8 @@ impl TorrentBuilder<state::Empty> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            files: vec![],
+            paths: vec![],
+            filters: vec![],
             name: None,
             common_fields: CommonFields {
                 piece_length: None,
@@ -991,35 +1012,24 @@ impl TorrentBuilder<state::Empty> {
         }
     }
 
-    pub fn add_path(mut self, path: impl Into<PathBuf>) -> Result<TorrentBuilder<HasFiles>, Error> {
-        self.add_path_internal(path)?;
-
-        Ok(self.into_state())
-    }
-
     pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(
         mut self,
         paths: I,
-    ) -> Result<TorrentBuilder<HasFiles>, Error> {
-        for path in paths {
-            match self.add_path_internal(path) {
-                Err(Error::NoFiles) | Ok(()) => (),
-                Err(e) => return Err(e),
-            }
+    ) -> Result<TorrentBuilder<HasPaths>, Error> {
+        let mut paths = paths.into_iter().map(Into::into).peekable();
+        if paths.peek().is_none() {
+            return Err(Error::NoPaths);
         }
 
-        if self.files.is_empty() {
-            Err(Error::NoFiles)
-        } else {
-            Ok(self.into_state())
-        }
+        self.paths.extend(paths);
+        Ok(self.into_state())
     }
 }
 
-// ── HasFiles state ───────────────────────────────────────────────────────────
+// ── HasPaths state ───────────────────────────────────────────────────────────
 
-impl TorrentBuilder<state::HasFiles> {
-    pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, Error> {
+impl TorrentBuilder<state::HasPaths> {
+    pub fn from_path(path: impl Into<PathBuf>) -> Self {
         TorrentBuilder::new().add_path(path)
     }
 
@@ -1027,37 +1037,22 @@ impl TorrentBuilder<state::HasFiles> {
         TorrentBuilder::new().add_paths(paths)
     }
 
-    pub fn add_path(mut self, path: impl Into<PathBuf>) -> Result<Self, Error> {
-        match self.add_path_internal(path) {
-            Err(Error::NoFiles) | Ok(()) => Ok(self),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(
-        mut self,
-        paths: I,
-    ) -> Result<Self, Error> {
-        for path in paths {
-            match self.add_path_internal(path) {
-                Err(Error::NoFiles) | Ok(()) => (),
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(self)
+    pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(mut self, paths: I) -> Self {
+        self.paths.extend(paths.into_iter().map(Into::into));
+        self
     }
 
     pub fn build(self) -> Result<TorrentBuf, Error> {
         self.build_hybrid()
     }
 
-    pub fn build_v1(mut self) -> Result<TorrentBuf, Error> {
-        let common_fields = common_fields(self.common_fields, &self.files);
+    pub fn build_v1(self) -> Result<TorrentBuf, Error> {
+        let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
+        let common_fields = common_fields(self.common_fields, &files);
 
-        self.files.sort();
+        files.sort();
 
-        let (common_prefix, files) = remove_common_prefix(&self.files);
+        let (common_prefix, files) = remove_common_prefix(&files);
         let v1 = v1_fields(
             &files,
             piece_length_usize(common_fields.piece_length)?,
@@ -1075,8 +1070,9 @@ impl TorrentBuilder<state::HasFiles> {
         ))
     }
 
-    pub fn build_v2(mut self) -> Result<TorrentBuf, Error> {
-        let common_fields = common_fields(self.common_fields, &self.files);
+    pub fn build_v2(self) -> Result<TorrentBuf, Error> {
+        let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
+        let common_fields = common_fields(self.common_fields, &files);
 
         if !common_fields.piece_length.is_power_of_two()
             || common_fields.piece_length.get() < 16 * 1024
@@ -1084,9 +1080,9 @@ impl TorrentBuilder<state::HasFiles> {
             return Err(Error::InvalidPieceLengthV2(common_fields.piece_length));
         }
 
-        self.files.sort();
+        files.sort();
 
-        let (common_prefix, files) = remove_common_prefix(&self.files);
+        let (common_prefix, files) = remove_common_prefix(&files);
 
         let (v2, v2_ext) = v2_fields(&files, piece_length_usize(common_fields.piece_length)?)?;
 
@@ -1101,8 +1097,9 @@ impl TorrentBuilder<state::HasFiles> {
         ))
     }
 
-    pub fn build_hybrid(mut self) -> Result<TorrentBuf, Error> {
-        let common_fields = common_fields(self.common_fields, &self.files);
+    pub fn build_hybrid(self) -> Result<TorrentBuf, Error> {
+        let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
+        let common_fields = common_fields(self.common_fields, &files);
 
         if !common_fields.piece_length.is_power_of_two()
             || common_fields.piece_length.get() < 16 * 1024
@@ -1110,9 +1107,9 @@ impl TorrentBuilder<state::HasFiles> {
             return Err(Error::InvalidPieceLengthV2(common_fields.piece_length));
         }
 
-        self.files.sort();
+        files.sort();
 
-        let (common_prefix, files) = remove_common_prefix(&self.files);
+        let (common_prefix, files) = remove_common_prefix(&files);
 
         let (v1, v2, v2_ext) = hybrid_fields(
             &files,
@@ -1140,7 +1137,10 @@ pub enum Error {
     #[error("Error while walking a directory: {0}")]
     WalkDir(#[from] walkdir::Error),
 
-    #[error("No files were provided to the factory")]
+    #[error("No paths were provided to `add_paths`")]
+    NoPaths,
+
+    #[error("No files were found after traversal")]
     NoFiles,
 
     #[error("File/directory name is not valid UTF-8")]

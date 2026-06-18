@@ -460,7 +460,7 @@ impl Torrent<'_> {
     #[must_use]
     pub fn is_v1(&self) -> bool {
         matches!(
-            &self.meta,
+            self.meta,
             TorrentMeta::V1 { .. } | TorrentMeta::Hybrid { .. }
         )
     }
@@ -468,7 +468,7 @@ impl Torrent<'_> {
     #[must_use]
     pub fn is_v2(&self) -> bool {
         matches!(
-            &self.meta,
+            self.meta,
             TorrentMeta::V2 { .. } | TorrentMeta::Hybrid { .. }
         )
     }
@@ -567,6 +567,7 @@ impl Torrent<'_> {
                         let mut v1_files: Vec<PathBuf> = files
                             .iter()
                             .filter(|f| {
+                                // Disregard padding files
                                 !f.attr
                                     .as_ref()
                                     .is_some_and(|a| a.flags.contains(FileInfoAttrFlags::PADDING))
@@ -845,11 +846,10 @@ impl<'a> TryFrom<Bencode<'a>> for FileLeaf<'a> {
     type Error = Error;
 
     fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
-        let dict = bencode.into_dict()?;
+        let mut dict = bencode.into_dict()?;
 
         let length: u64 = dict
-            .get(b"length".as_slice())
-            .ok_or(Error::MissingField("length".to_string()))?
+            .require(b"length")?
             .as_int()?
             .try_into()
             .map_err(|_| Error::IllegalFieldValue("length"))?;
