@@ -707,7 +707,7 @@ impl InfoV2<'_> {
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct TrackerTier(pub Vec<Url>);
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct PieceLayers<'a>(pub BTreeMap<Cow<'a, [u8; 32]>, Cow<'a, [u8]>>);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
