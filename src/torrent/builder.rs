@@ -19,12 +19,12 @@ use crate::torrent::{
     InfoHybrid, InfoV1, InfoV1Buf, InfoV2, InfoV2Buf, PieceLayers, PieceLayersBuf, Torrent,
     TorrentBuf, TorrentMeta, TrackerTier,
     builder::{
-        field_builders::{common_fields, hybrid_fields, v1_fields, v2_fields},
+        field_builders::{CommonFields, common_fields, hybrid_fields, v1_fields, v2_fields},
         hashing::V2FileHashes,
         state::HasPaths,
         utils::{
-            CommonFields, piece_length_usize, remove_common_prefix, resolve_file_paths,
-            resolve_name, torrent_from_parts,
+            piece_length_usize, remove_common_prefix, resolve_file_paths, resolve_name,
+            torrent_from_parts,
         },
     },
 };
@@ -268,10 +268,14 @@ mod hashing {
 
 mod field_builders {
     use rayon::iter::IndexedParallelIterator;
+    use url::Url;
 
-    use crate::torrent::builder::{
-        hashing::{v1_piece_hashes, v2_file_hashes},
-        utils::{CommonFields, CommonFieldsResolved, FileEntry, FileManager},
+    use crate::torrent::{
+        TrackerTier,
+        builder::{
+            hashing::{v1_piece_hashes, v2_file_hashes},
+            utils::{FileEntry, FileManager},
+        },
     };
 
     use super::{
@@ -280,6 +284,32 @@ mod field_builders {
         ParallelIterator, Path, PathBuf, PieceLayers, PieceLayersBuf, SystemTime, UNIX_EPOCH,
         V2FileHashes,
     };
+
+    #[derive(Debug)]
+    pub(super) struct CommonFields {
+        pub(super) piece_length: Option<NonZeroU64>,
+        pub(super) private: bool,
+        pub(super) source: Option<String>,
+        pub(super) tracker_tiers: Vec<TrackerTier>,
+        pub(super) web_seeds: Vec<Url>,
+        pub(super) creation_date: Option<u64>,
+        pub(super) created_by: Option<String>,
+        pub(super) comment: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub(super) struct CommonFieldsResolved {
+        pub(super) piece_length: NonZeroU64,
+        pub(super) private: bool,
+        pub(super) source: Option<Cow<'static, str>>,
+        pub(super) tracker: Option<Url>,
+        pub(super) tracker_tiers: Option<Vec<TrackerTier>>,
+        pub(super) web_seeds: Option<Vec<Url>>,
+        pub(super) creation_date: Option<u64>,
+        pub(super) created_by: Option<Cow<'static, str>>,
+        pub(super) comment: Option<Cow<'static, str>>,
+        pub(super) encoding: Option<Cow<'static, str>>,
+    }
 
     pub(super) fn v1_fields(
         files: &[FileEntry],
@@ -559,11 +589,11 @@ mod utils {
     use memmap2::{Mmap, MmapOptions};
     use walkdir::WalkDir;
 
-    use crate::torrent::{TrackerTier, builder::FilterFn};
+    use crate::torrent::builder::{FilterFn, field_builders::CommonFieldsResolved};
 
     use super::{
         Cow, Error, File, Info, InfoHybrid, InfoV1Buf, InfoV2Buf, NonZeroU64, Path, PathBuf,
-        PieceLayersBuf, Torrent, TorrentBuf, TorrentMeta, Url, clean,
+        PieceLayersBuf, Torrent, TorrentBuf, TorrentMeta, clean,
     };
 
     pub(super) fn piece_length_usize(piece_length: NonZeroU64) -> Result<usize, Error> {
@@ -755,32 +785,6 @@ mod utils {
         pub(super) meta_path: PathBuf,
         pub(super) length: u64,
         pub(super) padding: bool,
-    }
-
-    #[derive(Debug)]
-    pub(super) struct CommonFields {
-        pub(super) piece_length: Option<NonZeroU64>,
-        pub(super) private: bool,
-        pub(super) source: Option<String>,
-        pub(super) tracker_tiers: Vec<TrackerTier>,
-        pub(super) web_seeds: Vec<Url>,
-        pub(super) creation_date: Option<u64>,
-        pub(super) created_by: Option<String>,
-        pub(super) comment: Option<String>,
-    }
-
-    #[derive(Debug)]
-    pub(super) struct CommonFieldsResolved {
-        pub(super) piece_length: NonZeroU64,
-        pub(super) private: bool,
-        pub(super) source: Option<Cow<'static, str>>,
-        pub(super) tracker: Option<Url>,
-        pub(super) tracker_tiers: Option<Vec<TrackerTier>>,
-        pub(super) web_seeds: Option<Vec<Url>>,
-        pub(super) creation_date: Option<u64>,
-        pub(super) created_by: Option<Cow<'static, str>>,
-        pub(super) comment: Option<Cow<'static, str>>,
-        pub(super) encoding: Option<Cow<'static, str>>,
     }
 
     #[derive(Debug)]
