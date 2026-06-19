@@ -302,7 +302,6 @@ mod field_builders {
         pub(super) piece_length: NonZeroU64,
         pub(super) private: bool,
         pub(super) source: Option<Cow<'static, str>>,
-        pub(super) tracker: Option<Url>,
         pub(super) tracker_tiers: Option<Vec<TrackerTier>>,
         pub(super) web_seeds: Option<Vec<Url>>,
         pub(super) creation_date: Option<u64>,
@@ -404,7 +403,7 @@ mod field_builders {
 
         let file_infos = v1_file_infos(&files_pad)?;
         let file_mode = match (file_infos.len(), single_file) {
-            (0, _) => unreachable!("TorrentFactory<HasFiles> does not allow an empty file vector"),
+            (0, _) => return Err(Error::NoFiles),
             (1, true) => FileMode::Single {
                 length: file_infos[0].length,
                 md5sum: None,
@@ -441,11 +440,6 @@ mod field_builders {
                 .unwrap_or(0)
         });
 
-        let tracker = common_fields
-            .tracker_tiers
-            .first()
-            .and_then(|tier| tier.first().cloned());
-
         let tracker_tiers = common_fields
             .tracker_tiers
             .into_iter()
@@ -468,7 +462,6 @@ mod field_builders {
             piece_length,
             private: common_fields.private,
             source: common_fields.source.map(Cow::Owned),
-            tracker,
             tracker_tiers,
             web_seeds,
             creation_date: Some(creation_date),
@@ -768,7 +761,6 @@ mod utils {
         };
 
         Torrent {
-            tracker: common_fields.tracker,
             tracker_tiers: common_fields.tracker_tiers,
             web_seeds: common_fields.web_seeds,
             creation_date: common_fields.creation_date,
@@ -1021,12 +1013,12 @@ impl TorrentBuilder<state::Empty> {
         mut self,
         paths: I,
     ) -> Result<TorrentBuilder<HasPaths>, Error> {
-        let mut paths = paths.into_iter().map(Into::into).peekable();
-        if paths.peek().is_none() {
-            return Err(Error::NoPaths);
-        }
+        let mut paths = paths.into_iter().map(Into::into);
+        let first_path = paths.next().ok_or(Error::NoPaths)?;
 
+        self.paths.push(first_path);
         self.paths.extend(paths);
+
         Ok(self.into_state())
     }
 }

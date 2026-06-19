@@ -145,8 +145,11 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
             }
         }
 
-        if let Some(tracker) = &torrent.tracker {
-            dict.insert(b"announce", Self::Bytes(tracker.as_str().as_bytes()));
+        if let Some(tracker_tiers) = &torrent.tracker_tiers
+            && let Some(first_tier) = tracker_tiers.first()
+            && let Some(first_tracker) = first_tier.first()
+        {
+            dict.insert(b"announce", Self::Bytes(first_tracker.as_str().as_bytes()));
         }
 
         if let Some(tracker_tiers) = &torrent.tracker_tiers {
