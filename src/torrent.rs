@@ -546,7 +546,7 @@ impl Torrent<'_> {
     /// ```no_run
     /// use bitors::Torrent;
     ///
-    /// let torrent = Torrent::builder().add_path("my_file").unwrap().build().unwrap();
+    /// let torrent = Torrent::builder().add_path("my_file").build().unwrap();
     /// println!("{}", torrent.magnet_link());
     /// // Hybrid torrent: magnet:?xt=urn:btih:<v1 hash>&xt=urn:btmh:<v2 hash>...
     /// ```

@@ -29,7 +29,7 @@ const URI_SET: &AsciiSet = &NON_ALPHANUMERIC
 /// ```no_run
 /// use bitors::Torrent;
 ///
-/// let torrent = Torrent::builder().add_path("my_file").unwrap().build().unwrap();
+/// let torrent = Torrent::builder().add_path("my_file").build().unwrap();
 /// println!("{}", torrent.magnet_link());
 /// // Hybrid torrent: magnet:?xt=urn:btih:<40 chars of v1 hash in hex>&xt=urn:btmh:<64 chars of v2 hash in hex>...
 /// ```
@@ -171,7 +171,7 @@ impl MagnetLink {
     /// ```no_run
     /// use bitors::Torrent;
     ///
-    /// let torrent = Torrent::builder().add_path("my_file").unwrap().build_v1().unwrap();
+    /// let torrent = Torrent::builder().add_path("my_file").build_v1().unwrap();
     /// println!("{}", torrent.magnet_link().v1_base32());
     /// // v1 torrent: magnet:?xt=urn:btih:<32 chars of v1 hash in base32>...
     /// ```

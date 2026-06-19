@@ -494,13 +494,13 @@ impl<'a> Bencode<'a> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use std::{error::Error, fs::File};
+    /// # use std::{error::Error, fs::File, io::BufWriter};
     /// # use bitors::{Torrent, bencode::Bencode};
     /// # fn main() -> Result<(), Box<dyn Error>> {
-    /// let torrent = Torrent::builder().add_path("my_file")?.build()?;
-    /// let mut file = File::create("my_file.torrent")?;
+    /// let torrent = Torrent::builder().add_path("my_file").build()?;
+    /// let mut writer = BufWriter::new(File::create("my_file.torrent")?);
     ///
-    /// torrent.to_bencode().encode_to_writer(&mut file)?;
+    /// torrent.to_bencode().encode_to_writer(&mut writer)?;
     /// # Ok(())
     /// # }
     ///
