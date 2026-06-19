@@ -217,7 +217,7 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
                         .try_into()
                         .map_err(|_| Error::IllegalFieldValue("piece layers (key)"))?;
                     let value = v.as_bytes()?;
-                    piece_layers.insert(Cow::Borrowed(key), Cow::Borrowed(value));
+                    piece_layers.insert(key, Cow::Borrowed(value));
                 }
 
                 Some(PieceLayers(piece_layers))
@@ -714,7 +714,7 @@ impl InfoV2<'_> {
 pub struct TrackerTier(pub Vec<Url>);
 
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
-pub struct PieceLayers<'a>(pub BTreeMap<Cow<'a, [u8; 32]>, Cow<'a, [u8]>>);
+pub struct PieceLayers<'a>(pub BTreeMap<[u8; 32], Cow<'a, [u8]>>);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum FileMode<'a> {
@@ -894,7 +894,7 @@ impl IntoOwned for PieceLayers<'_> {
         PieceLayers(
             self.0
                 .into_iter()
-                .map(|(k, v)| (Cow::Owned(k.into_owned()), Cow::Owned(v.into_owned())))
+                .map(|(k, v)| (k, Cow::Owned(v.into_owned())))
                 .collect(),
         )
     }

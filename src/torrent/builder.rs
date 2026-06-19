@@ -565,7 +565,7 @@ mod field_builders {
             if let Some((key, value)) = layer_opt {
                 piece_layers
                     .0
-                    .insert(Cow::Owned(key), Cow::Owned(value.into_flattened()));
+                    .insert(key, Cow::Owned(value.into_flattened()));
             }
         }
 
