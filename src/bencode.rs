@@ -45,6 +45,10 @@ fn encoded_bytes_len(byte_len: usize) -> usize {
     len_str_len + byte_len + 1
 }
 
+/// A helper function that inserts the common fields from [`Info`] into `dict`.
+///
+/// The common fields are those that are (or can optionally be) present in a metainfo
+/// file regardless of the BitTorrent version: `name`, `piece length`, `private`, and `source`.
 fn insert_info_common_fields<'a, T: IntoOwned>(
     dict: &mut BTreeMap<&[u8], Bencode<'a>>,
     info: &'a Info<'a, T>,
@@ -68,6 +72,12 @@ fn insert_info_common_fields<'a, T: IntoOwned>(
     }
 }
 
+/// A helper function that inserts the fields from [`InfoV1`] into `dict`.
+///
+/// Which fields are inserted depends on the variant of [`FileMode`] in [`InfoV1::file_mode`]:
+///
+/// - **[`FileMode::Single`]**: `length` and `md5sum` (if present).
+/// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
 fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a InfoV1<'a>) {
     dict.insert(b"pieces", Bencode::Bytes(info.pieces.as_flattened()));
 
@@ -90,6 +100,12 @@ fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a 
     }
 }
 
+/// A helper function that inserts the [`file_tree`](InfoV2::file_tree) field and the
+/// [`META_VERSION`](InfoV2::META_VERSION) constant from [`InfoV2`] into `dict`.
+/// The keys of the inserted values are `file tree` and `meta version`, respectively.
+///
+/// See the `From<&FileTree>` implementation on [`Bencode`] for more information on how
+/// [`file_tree`](InfoV2::file_tree) is serialized.
 fn insert_info_v2_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a InfoV2<'a>) {
     dict.insert(
         b"meta version",
@@ -123,11 +139,9 @@ pub enum Bencode<'a> {
 impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
     /// Serializes a [`Torrent`] into its bencode representation.
     ///
-    /// The output is a [`Bencode::Dict`] that contains the serialized [`info`](`Info`) dictionary as well as other
-    /// optional fields from [`Torrent`] if set.
-    ///
-    /// The `piece layers` field (represented by [`TorrentV2Ext`]) is not included in v1-only torrents. See
-    /// the `From<&TorrentV2Ext>` implementation on [`Bencode`] for more information.
+    /// The output is a [`Bencode::Dict`] that contains the serialized [`TorrentMeta`] as well as other
+    /// optional fields from [`Torrent`] if set. See the `From<&TorrentMeta>` implementation on
+    /// [`Bencode`] for more information on how [`TorrentMeta`] is serialized.
     fn from(torrent: &'a Torrent) -> Self {
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -202,7 +216,7 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
 impl<'a> From<&'a PieceLayers<'a>> for Bencode<'a> {
     /// Serializes [`PieceLayers`] into its bencode representation.
     ///
-    /// The output is a [`Bencode::Dict`] that contains a dictionary that maps
+    /// The output is a [`Bencode::Dict`] that contains a dictionary that maps the
     /// v2 file hashes from the [`file tree`](`crate::torrent::InfoV2::file_tree`) field in the
     /// [`info`](`crate::torrent::InfoV2`) dictionary to the hashes from a certain layer of the Merkle hash tree
     /// of that file. See [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) for more details.
@@ -220,25 +234,17 @@ impl<'a> From<&'a PieceLayers<'a>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a Info<'a, InfoV1<'a>>> for Bencode<'a> {
-    /// Serializes an [`Info`] into its bencode representation, the `info` dictionary.
+    /// Serializes a v1-only [`Info`] (`Info<'a, InfoV1<'a>>`) into its bencode representation.
     ///
-    /// The output is a [`Bencode::Dict`]. The following keys are always present: [`name`](Info::name),
-    /// [`piece length`](Info::piece_length). The `private` field is included (and set to 1) only if [`Info::private`] is `true`.
+    /// The output is a [`Bencode::Dict`] that contains v1-specific fields and fields common for both
+    /// versions of BitTorrent.
     ///
-    /// Other fields are included only if set to [`Some`]. These include the [`source`](Info::source) field, as well as the
-    /// following version-specific fields:
+    /// The common fields are `name`, `piece length`, `private`, and `source`.
     ///
-    /// - [`pieces`](crate::torrent::InfoV1::pieces) - always included in a v1 torrent.
-    ///   - [`length`](FileMode::Single::length), [`md5sum`](FileMode::Single::md5sum) - included if the v1 torrent
-    ///     consists of a single file.
-    ///   - [`files`](FileMode::Multi::files) - included if the v1 torrent consists of multiple files. In this case,
-    ///     a list of [file information items](FileInfo) is included. See the `From<&FileInfo>` implementation on [`Bencode`]
-    ///     for more information.
-    /// - [`meta version`](crate::torrent::InfoV2::meta_version), [`file tree`](crate::torrent::InfoV2::file_tree) -
-    ///   always included in a v2 torrent. `meta version` is always set to 2. `file tree` contains the v2 file tree. See
-    ///   the `From<&FileTree>` implementation of [`Bencode`] for more information.
-    ///
-    /// Hybrid torrents contain all of the fields from both of the options above.
+    /// The v1-specific fields are inserted based on the variant of [`InfoV1::file_mode`]:
+    /// - **[`FileMode::Single`]**: `length` and `md5sum` (if present).
+    /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
+    ///   See the `From<&FileMode>` implementation on [`Bencode`] for more information.
     fn from(info: &'a Info<'a, InfoV1<'a>>) -> Self {
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -250,6 +256,16 @@ impl<'a> From<&'a Info<'a, InfoV1<'a>>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a Info<'a, InfoV2<'a>>> for Bencode<'a> {
+    /// Serializes a v2-only [`Info`] (`Info<'a, InfoV2<'a>>`) into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains v2-specific fields and fields common for both
+    /// versions of BitTorrent.
+    ///
+    /// The common fields are `name`, `piece length`, `private`, and `source`.
+    /// The v2-specific fields are `file tree` and `meta version` (always 2).
+    ///
+    /// See the `From<&FileTree>` implementation on [`Bencode`] for more information on the
+    /// `file tree` field.
     fn from(info: &'a Info<'a, InfoV2<'a>>) -> Self {
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -261,6 +277,20 @@ impl<'a> From<&'a Info<'a, InfoV2<'a>>> for Bencode<'a> {
 }
 
 impl<'a> From<&'a Info<'a, InfoHybrid<'a>>> for Bencode<'a> {
+    /// Serializes a hybrid [`Info`] (`Info<'a, InfoHybrid<'a>>`) into its bencode representation.
+    ///
+    /// The output is a [`Bencode::Dict`] that contains v1-specific fields, v2-specific fields,
+    /// and fields common for both versions of BitTorrent.
+    ///
+    /// The common fields are `name`, `piece length`, `private`, and `source`.
+    ///
+    /// The v1-specific fields are inserted based on the variant of [`InfoV1::file_mode`]:
+    /// - **[`FileMode::Single`]**: `length` and `md5sum` (if present).
+    /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
+    ///   See the `From<&FileMode>` implementation on [`Bencode`] for more information.
+    ///
+    /// The v2-specific fields are `file tree` and `meta version` (always 2). See the`From<&FileTree>`
+    /// implementation on [`Bencode`] for more information on the `file tree` field.
     fn from(info: &'a Info<'a, InfoHybrid<'a>>) -> Self {
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
@@ -312,7 +342,7 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
 
 impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
     /// Serializes a [`FileTree`] into its bencode representation, the `file tree` field,
-    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
+    /// according to [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
     ///
     /// The output is a [`Bencode::Dict`] that contains one or more trees of path components.
     /// Each child, represented by [`FileTreeNode`], contains either another [`FileTree`] or
@@ -333,7 +363,7 @@ impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
 
 impl<'a> From<&'a FileTreeNode<'a>> for Bencode<'a> {
     /// Serializes a [`FileTreeNode`] inside a [`FileTree`] into its bencode representation
-    /// as per [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
+    /// according to [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#file-tree-layout).
     ///
     /// The output is a [`Bencode::Dict`] whose content depends on the variant of [`FileTreeNode`]:
     ///
@@ -394,7 +424,10 @@ impl<'a> Bencode<'a> {
     pub fn as_int(&self) -> Result<i64, Error> {
         match self {
             Self::Int(i) => Ok(*i),
-            _ => Err(Error::WrongType { expected: "int" }),
+            _ => Err(Error::WrongType {
+                expected: "int",
+                actual: self.variant_desc(),
+            }),
         }
     }
 
@@ -406,7 +439,10 @@ impl<'a> Bencode<'a> {
     pub fn as_bytes(&self) -> Result<&'a [u8], Error> {
         match self {
             Self::Bytes(b) => Ok(b),
-            _ => Err(Error::WrongType { expected: "bytes" }),
+            _ => Err(Error::WrongType {
+                expected: "bytes",
+                actual: self.variant_desc(),
+            }),
         }
     }
 
@@ -418,7 +454,10 @@ impl<'a> Bencode<'a> {
     pub fn as_list(&self) -> Result<&[Bencode<'a>], Error> {
         match self {
             Self::List(l) => Ok(l),
-            _ => Err(Error::WrongType { expected: "list" }),
+            _ => Err(Error::WrongType {
+                expected: "list",
+                actual: self.variant_desc(),
+            }),
         }
     }
 
@@ -430,7 +469,10 @@ impl<'a> Bencode<'a> {
     pub fn as_dict(&self) -> Result<&BTreeMap<&[u8], Bencode<'a>>, Error> {
         match self {
             Self::Dict(d) => Ok(d),
-            _ => Err(Error::WrongType { expected: "dict" }),
+            _ => Err(Error::WrongType {
+                expected: "dict",
+                actual: self.variant_desc(),
+            }),
         }
     }
 
@@ -455,7 +497,10 @@ impl<'a> Bencode<'a> {
     pub fn into_list(self) -> Result<Vec<Bencode<'a>>, Error> {
         match self {
             Self::List(l) => Ok(l),
-            _ => Err(Error::WrongType { expected: "list" }),
+            _ => Err(Error::WrongType {
+                expected: "list",
+                actual: self.variant_desc(),
+            }),
         }
     }
 
@@ -467,7 +512,10 @@ impl<'a> Bencode<'a> {
     pub fn into_dict(self) -> Result<BTreeMap<&'a [u8], Bencode<'a>>, Error> {
         match self {
             Self::Dict(d) => Ok(d),
-            _ => Err(Error::WrongType { expected: "dict" }),
+            _ => Err(Error::WrongType {
+                expected: "dict",
+                actual: self.variant_desc(),
+            }),
         }
     }
 
@@ -487,6 +535,9 @@ impl<'a> Bencode<'a> {
 
     /// Encodes this [`Bencode`] element directly to a [writer](`Write`).
     ///
+    /// It is strongly recommended to use [`std::io::BufWriter`] in certain cases (e.g., when working
+    /// with files or sockets) since this function makes small and repeated writes to the writer.
+    ///
     /// # Errors
     ///
     /// Propagates any [`io::Error`] returned by the [writer](`Write`).
@@ -503,7 +554,6 @@ impl<'a> Bencode<'a> {
     /// torrent.to_bencode().encode_to_writer(&mut writer)?;
     /// # Ok(())
     /// # }
-    ///
     /// ```
     pub fn encode_to_writer<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
@@ -544,6 +594,22 @@ impl<'a> Bencode<'a> {
                     .map(|(k, v)| encoded_bytes_len(k.len()) + v.encoded_len())
                     .sum::<usize>()
             }
+        }
+    }
+
+    /// A helper function that returns the short description of the actual variant of this [`Bencode`].
+    ///
+    /// This is used in [`Error::WrongType`] when an [`Err`] is returned in an accessor method
+    /// (e.g., [`as_int`] or [`into_dict`]).
+    ///
+    /// [`as_int`]: Bencode::as_int
+    /// [`into_dict`]: Bencode::into_dict
+    fn variant_desc(&self) -> &'static str {
+        match self {
+            Self::Int(_) => "int",
+            Self::Bytes(_) => "bytes",
+            Self::List(_) => "list",
+            Self::Dict(_) => "dict",
         }
     }
 }
@@ -803,6 +869,8 @@ pub enum Error {
     WrongType {
         /// A short description of the expected type (e.g. `"int"` or `"dict"`).
         expected: &'static str,
+        /// A short description of the actual type.
+        actual: &'static str,
     },
 }
 
@@ -907,11 +975,17 @@ mod tests {
         let val = Bencode::Int(42);
         assert!(matches!(
             val.as_str(),
-            Err(Error::WrongType { expected: "bytes" })
+            Err(Error::WrongType {
+                expected: "bytes",
+                actual: "int"
+            })
         ));
         assert!(matches!(
             val.as_list(),
-            Err(Error::WrongType { expected: "list" })
+            Err(Error::WrongType {
+                expected: "list",
+                actual: "int"
+            })
         ));
     }
 
