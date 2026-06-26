@@ -39,7 +39,7 @@ pub struct MagnetLink {
     pub info_hashes: InfoHashes,
     /// The optional name of the torrent.
     pub name: Option<String>,
-    /// A flat list of the torrent trackers ([`Torrent::announce_list`]).
+    /// A flat list of torrent trackers ([`Torrent::tracker_tiers`]).
     pub trackers: Vec<Url>,
     /// The total size of the torrent.
     pub size: Option<u64>,
@@ -64,7 +64,12 @@ pub enum InfoHashes {
 impl From<&Torrent<'_>> for MagnetLink {
     /// Constructs a [`MagnetLink`] from a [`Torrent`].
     fn from(torrent: &Torrent) -> Self {
-        let trackers = torrent.trackers().into_iter().flatten().cloned().collect();
+        let trackers = torrent
+            .tracker_tiers()
+            .into_iter()
+            .cloned()
+            .flat_map(|tier| tier.0)
+            .collect();
 
         let info_hashes = match (torrent.info_hash_v1(), torrent.info_hash_v2()) {
             (Some(v1), Some(v2)) => InfoHashes::Hybrid { v1, v2 },

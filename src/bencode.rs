@@ -309,7 +309,7 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
     /// it is serialized as a [`Bencode::Dict`] with the fields [`length`](FileInfo::length)
     /// and [`path`](FileInfo::path). It may also optionally contain the fields [`md5sum`](FileInfo::md5sum)
     /// and [`attr`](FileInfo::attr). For more information on the latter, see
-    /// [`FileInfoAttr::encoded`](`crate::torrent::FileInfoAttr::encoded`).
+    /// [`FileInfoAttr`](`crate::torrent::FileInfoAttr`).
     ///
     /// Not present in v2-only torrents.
     fn from(file_info: &'a FileInfo<'a>) -> Self {
@@ -536,7 +536,7 @@ impl<'a> Bencode<'a> {
     /// Encodes this [`Bencode`] element directly to a [writer](`Write`).
     ///
     /// It is strongly recommended to use [`std::io::BufWriter`] in certain cases (e.g., when working
-    /// with files or sockets) since this function makes small and repeated writes to the writer.
+    /// with files or sockets) since this method makes small and repeated writes to the writer.
     ///
     /// # Errors
     ///
@@ -815,7 +815,7 @@ impl<'a> Parser<'a> {
             };
 
             if let Some(prev) = last_key
-                && key <= prev
+                && key < prev
             {
                 return Err(Error::UnsortedDictKeys);
             }
@@ -823,6 +823,10 @@ impl<'a> Parser<'a> {
             last_key = Some(key);
 
             let value = self.parse_internal(depth + 1)?;
+
+            if dict.contains_key(key) {
+                return Err(Error::DuplicateKeys);
+            }
             dict.insert(key, value);
         }
         self.cursor += 1;
@@ -859,13 +863,16 @@ pub enum Error {
     /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
     #[error("Unsorted dict keys")]
     UnsortedDictKeys,
+    /// A duplicate key was encountered.
+    #[error("Duplicate keys")]
+    DuplicateKeys,
     /// A key of a dictionary was not a byte string (i.e. [`Bencode::Bytes`]). This is required by
     /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
     #[error("Keys of Bencode dictionaries must be strings")]
     NonStringKey,
     /// A [`Bencode`] accessor method (e.g. [`as_int`](Bencode::as_int)) was called on
     /// a value of a different variant.
-    #[error("Wrong Bencode type, expected {expected}")]
+    #[error("Wrong Bencode type, expected \"{expected}\", found \"{actual}\"")]
     WrongType {
         /// A short description of the expected type (e.g. `"int"` or `"dict"`).
         expected: &'static str,
