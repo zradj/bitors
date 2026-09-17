@@ -814,6 +814,10 @@ impl<'a> Parser<'a> {
                 return Err(Error::NonStringKey);
             };
 
+            if dict.contains_key(key) {
+                return Err(Error::DuplicateKeys);
+            }
+
             if let Some(prev) = last_key
                 && key < prev
             {
@@ -824,9 +828,6 @@ impl<'a> Parser<'a> {
 
             let value = self.parse_internal(depth + 1)?;
 
-            if dict.contains_key(key) {
-                return Err(Error::DuplicateKeys);
-            }
             dict.insert(key, value);
         }
         self.cursor += 1;

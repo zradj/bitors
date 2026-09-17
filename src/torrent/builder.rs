@@ -29,19 +29,26 @@ use crate::torrent::{
     },
 };
 
-// 16 KiB (per BEP 52)
+/// The block size as defined by BEP 52 - 16 KiB.
 const V2_BLOCK_SIZE: usize = 16 * 1024;
+/// The [`u64`] equivalent of [`V2_BLOCK_SIZE`].
 const V2_BLOCK_SIZE_U64: u64 = V2_BLOCK_SIZE as u64;
 
+/// States of [`TorrentBuilder`].
 pub mod state {
+    /// Represents a [`TorrentBuilder`](super::TorrentBuilder) that has no paths supplied to it.
     #[derive(Debug)]
     pub struct Empty;
 
+    /// Represents a [`TorrentBuilder`](super::TorrentBuilder) that was supplied with at least one path.
     #[derive(Debug)]
     pub struct HasPaths;
 }
 
+/// Structs and functions that deal with file hashing for the torrent.
 mod hashing {
+    use std::{num::NonZeroU64, sync::OnceLock};
+
     use crate::torrent::builder::utils::{FileEntry, FileManager};
     use rayon::prelude::*;
 
@@ -50,31 +57,60 @@ mod hashing {
         V2_BLOCK_SIZE_U64,
     };
 
+    /// An array of all zeros, used to simulate a padding file.
     static ZEROS: [u8; 64 * 1024] = [0; 64 * 1024];
+    /// The hashes of empty Merkle trees of depths up to 32.
+    static EMPTY_TREE_HASHES: OnceLock<[[u8; 32]; 33]> = OnceLock::new();
 
+    /// A vector of 20-byte piece hashes.
     #[derive(Debug)]
     pub(super) struct V1PieceHashes(pub(super) Vec<[u8; 20]>);
 
+    /// Represents the value of the `pieces root` field for non-empty files
+    /// as well as the corresponding entry in the `piece layers` field if applicable.
     #[derive(Debug)]
     pub(super) enum V2FileHashes {
+        /// The file is empty and thus has no hashes.
         Empty,
+        /// The file's length is smaller than or equal to the piece length, so it
+        /// does not have a corresponding entry in the `piece layers` field.
         SinglePiece {
+            /// The value of the `pieces root` field for this file.
             root: [u8; 32],
         },
+        /// The file's length was larger than the piece length.
         MultiPiece {
+            /// The value of the `pieces root` field for this file.
             root: [u8; 32],
+            /// The corresponding entry in the `piece layers` field.
             layer: Vec<[u8; 32]>,
         },
     }
 
+    /// Information on a "chunk", or a part of a piece, including the file's index
+    /// in the [`FileManager`], the offset within the file, the length of the chunk,
+    /// and whether the chunk is part of a padding file.
+    ///
+    /// A use is registered in [`FileManager`] for each chunk.
     #[derive(Debug, Clone)]
     struct V1ChunkPlan {
+        /// The index of the file in the [`FileManager`].
         file_index: usize,
+        /// The offset of the chunk within the file.
         offset: usize,
+        /// The length of the chunk in bytes.
         length: usize,
+        /// Indicates whether the chunk is part of a padding file. In this case,
+        /// no I/O operation is performed and a stream of zeros is read directly
+        /// from memory.
         padding: bool,
     }
 
+    /// Computes the v1 piece hashes given the files. In v1, all files are treated
+    /// as a single byte stream, which is then divided into pieces. This means
+    /// that pieces can span file boundaries.
+    ///
+    /// Hash calculation is parallelized using `rayon` and [`FileManager`].
     pub(super) fn v1_piece_hashes(
         files: &[FileEntry],
         piece_length: usize,
@@ -151,30 +187,38 @@ mod hashing {
         Ok(V1PieceHashes(hashes))
     }
 
+    /// Computes the v2 hashes for the given file, which include the value of
+    /// the `pieces root` field and the value of the corresponding entry in the
+    /// `piece layers` field, if applicable. This is parallelized using `rayon`.
     pub(super) fn v2_file_hashes(
-        file: &FileEntry,
         piece_length: usize,
         file_manager: &FileManager,
-        fm_idx: usize,
+        file_length: u64,
+        file_idx: usize,
     ) -> Result<V2FileHashes, Error> {
         debug_assert!(piece_length.is_power_of_two());
         debug_assert!(piece_length >= V2_BLOCK_SIZE);
 
-        if file.length == 0 {
+        if file_length == 0 {
             return Ok(V2FileHashes::Empty);
         }
 
-        let padded_length: usize = file
-            .length
+        let padded_length: usize = file_length
             .max(V2_BLOCK_SIZE_U64)
             .next_power_of_two()
             .try_into()
-            .map_err(|_| Error::FileTooLarge(file.length))?;
+            .map_err(|_| Error::FileTooLarge(file_length))?;
 
         let chunk_size = piece_length.min(padded_length);
         let target_depth = (chunk_size / V2_BLOCK_SIZE).ilog2();
 
-        let mmap = file_manager.acquire(fm_idx)?;
+        if target_depth >= 32 {
+            return Err(Error::PieceLengthTooLarge(
+                NonZeroU64::new(piece_length as u64).unwrap(),
+            ));
+        }
+
+        let mmap = file_manager.acquire(file_idx)?;
 
         let real_piece_roots: Vec<[u8; 32]> = mmap
             .par_chunks(chunk_size)
@@ -205,7 +249,7 @@ mod hashing {
 
         let root_hash = layer[0];
 
-        if file.length > piece_length as u64 {
+        if file_length > piece_length as u64 {
             Ok(V2FileHashes::MultiPiece {
                 root: root_hash,
                 layer: real_piece_roots,
@@ -215,6 +259,7 @@ mod hashing {
         }
     }
 
+    /// Computes the tree using stack until the `target_depth`.
     fn compute_piece_root(chunk: &[u8], target_depth: u32, hasher: &mut Sha256) -> [u8; 32] {
         let blocks_per_chunk = 1 << target_depth;
 
@@ -254,24 +299,39 @@ mod hashing {
         stack[0].0
     }
 
+    /// Returns the hash of an empty tree of given depth. The hashes
+    /// are computed only once after the first call.
     fn empty_tree_hash(depth: u32) -> [u8; 32] {
-        let mut hash = [0u8; 32];
-        for _ in 0..depth {
-            let mut hasher = Sha256::new();
-            hasher.update(hash);
-            hasher.update(hash);
-            hash = hasher.finalize().into();
-        }
-        hash
+        debug_assert!(depth <= 32);
+
+        let hashes = EMPTY_TREE_HASHES.get_or_init(|| {
+            let mut table = [[0u8; 32]; 33];
+            let mut current = [0u8; 32];
+
+            table[0] = current;
+
+            for item in table.iter_mut().skip(1) {
+                let mut hasher = Sha256::new();
+                hasher.update(current);
+                hasher.update(current);
+                current = hasher.finalize().into();
+                *item = current;
+            }
+
+            table
+        });
+
+        hashes[depth as usize]
     }
 }
 
+/// Utility structs and functions that specifically deal with field construction for the torrent.
 mod field_builders {
     use rayon::iter::IndexedParallelIterator;
     use url::Url;
 
     use crate::torrent::{
-        TrackerTier,
+        FileInfoBuf, FileTreeBuf, TrackerTier,
         builder::{
             hashing::{v1_piece_hashes, v2_file_hashes},
             utils::{FileEntry, FileManager},
@@ -285,6 +345,13 @@ mod field_builders {
         V2FileHashes,
     };
 
+    /// Unprocessed fields common for both versions of BitTorrent. For more information on
+    /// each of them, see the corresponding fields in [`Torrent`] and
+    /// [`Info`]. For the default values, see [`TorrentBuilder`].
+    ///
+    /// [`Torrent`]: crate::Torrent
+    /// [`Info`]: crate::torrent::Info
+    /// [`TorrentBuilder`]: super::TorrentBuilder
     #[derive(Debug)]
     pub(super) struct CommonFields {
         pub(super) piece_length: Option<NonZeroU64>,
@@ -297,6 +364,13 @@ mod field_builders {
         pub(super) comment: Option<String>,
     }
 
+    /// Resolved fields common for both versions of BitTorrent. For more information on
+    /// each of them, see the corresponding fields in [`Torrent`] and
+    /// [`Info`]. For the default values, see [`TorrentBuilder`].
+    ///
+    /// [`Torrent`]: crate::Torrent
+    /// [`Info`]: crate::torrent::Info
+    /// [`TorrentBuilder`]: super::TorrentBuilder
     #[derive(Debug)]
     pub(super) struct CommonFieldsResolved {
         pub(super) piece_length: NonZeroU64,
@@ -310,6 +384,7 @@ mod field_builders {
         pub(super) encoding: Option<Cow<'static, str>>,
     }
 
+    /// Hashes the provided files and constructs an [`InfoV1`].
     pub(super) fn v1_fields(
         files: &[FileEntry],
         piece_length: usize,
@@ -336,6 +411,7 @@ mod field_builders {
         })
     }
 
+    /// Hashes the provided files and constructs an [`InfoV2`] and [`PieceLayers`].
     pub(super) fn v2_fields(
         files: &[FileEntry],
         piece_length: usize,
@@ -348,13 +424,14 @@ mod field_builders {
         let hashes_list = files
             .par_iter()
             .enumerate()
-            .map(|(i, file)| v2_file_hashes(file, piece_length, &file_manager, i))
+            .map(|(i, file)| v2_file_hashes(piece_length, &file_manager, file.length, i))
             .collect::<Result<Vec<_>, _>>()?;
         let (file_tree, piece_layers) = v2_file_tree_and_piece_layers(files, hashes_list);
 
         Ok((InfoV2 { file_tree }, piece_layers))
     }
 
+    /// Hashes the provided files and constructs an [`InfoV1`], an [`InfoV2`], and [`PieceLayers`].
     pub(super) fn hybrid_fields(
         files: &[FileEntry],
         piece_length: usize,
@@ -392,7 +469,7 @@ mod field_builders {
                     .enumerate()
                     .map(|(i, file)| {
                         let pad_idx = v1_to_v2_ids[i];
-                        v2_file_hashes(file, piece_length, &file_manager, pad_idx)
+                        v2_file_hashes(piece_length, &file_manager, file.length, pad_idx)
                     })
                     .collect::<Result<Vec<_>, _>>()
             },
@@ -423,6 +500,9 @@ mod field_builders {
         ))
     }
 
+    /// Resolves the common fields, inserting the defaults for some non-optional ones.
+    ///
+    /// See [`TorrentBuilder`](super::TorrentBuilder) for more information on the defaults.
     pub(super) fn common_fields(
         common_fields: CommonFields,
         files: &[(PathBuf, u64)],
@@ -436,8 +516,7 @@ mod field_builders {
         let creation_date = common_fields.creation_date.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_secs())
         });
 
         let tracker_tiers = common_fields
@@ -471,7 +550,8 @@ mod field_builders {
         }
     }
 
-    pub(super) fn v1_file_infos(files: &[FileEntry]) -> Result<Vec<FileInfo<'static>>, Error> {
+    /// Constructs [`FileInfo`] instances for the given files.
+    pub(super) fn v1_file_infos(files: &[FileEntry]) -> Result<Vec<FileInfoBuf>, Error> {
         let file_path_comps = files
             .iter()
             .map(|file| -> Result<Vec<String>, Error> {
@@ -509,10 +589,11 @@ mod field_builders {
         Ok(res)
     }
 
+    /// Constructs the [`FileTree`] and [`PieceLayers`] given the files and their corresponding hashes.
     pub(super) fn v2_file_tree_and_piece_layers(
         files: &[FileEntry],
         hashes_list: Vec<V2FileHashes>,
-    ) -> (FileTree<'static>, PieceLayers<'static>) {
+    ) -> (FileTreeBuf, PieceLayersBuf) {
         let mut file_tree = FileTree::default();
         let mut piece_layers = PieceLayers::default();
 
@@ -573,6 +654,7 @@ mod field_builders {
     }
 }
 
+/// Utility structs and functions for torrent construction.
 mod utils {
     use std::{
         ops::Deref,
@@ -589,6 +671,7 @@ mod utils {
         PieceLayersBuf, Torrent, TorrentBuf, TorrentMeta, clean,
     };
 
+    /// Attempts to convert a [`NonZeroU64`] `piece_length` to [`usize`].
     pub(super) fn piece_length_usize(piece_length: NonZeroU64) -> Result<usize, Error> {
         piece_length
             .get()
@@ -596,6 +679,13 @@ mod utils {
             .map_err(|_| Error::PieceLengthTooLarge(piece_length))
     }
 
+    /// Takes the raw paths and filters provided by the user and resolves file paths, returning a vector
+    /// of tuples of the form `(<file_path>, <file_length>)`.
+    ///
+    /// The function requests metadata for each non-filtered path. If a path corresponds to a file,
+    /// it is added as is. If a path corresponds to a directory, it is traversed using
+    /// [`WalkDir`] to search for files. If a path corresponds to neither file nor directory,
+    /// an [`Error`] is returned. The function also propagates any [`WalkDir`] errors via [`Error`].
     pub(super) fn resolve_file_paths(
         paths: Vec<PathBuf>,
         filters: &[FilterFn],
@@ -647,6 +737,8 @@ mod utils {
         }
     }
 
+    /// Resolves the torrent's name. See [`TorrentBuilder`](crate::torrent::builder::TorrentBuilder)
+    /// for more information.
     pub(super) fn resolve_name(
         name: Option<String>,
         files: &[FileEntry],
@@ -681,6 +773,8 @@ mod utils {
         })
     }
 
+    /// Determines the common prefix among the provided paths and constructs [`FileEntry`] elements
+    /// without it. The output is of the form `(<prefix>, <file_entries>)`.
     pub(super) fn remove_common_prefix(paths: &[(PathBuf, u64)]) -> (PathBuf, Vec<FileEntry>) {
         debug_assert!(!paths.is_empty());
 
@@ -720,6 +814,7 @@ mod utils {
         }
     }
 
+    /// Constructs the final [`Torrent`] from different parts.
     pub(super) fn torrent_from_parts(
         name: Cow<'static, str>,
         common_fields: CommonFieldsResolved,
@@ -771,28 +866,55 @@ mod utils {
         }
     }
 
+    /// A file entry in [`TorrentBuilder`](crate::torrent::builder::TorrentBuilder).
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub(super) struct FileEntry {
+        /// The file path provided by the user. Used to read the file contents.
         pub(super) disk_path: PathBuf,
+        /// The file path inside the torrent. Essentially the same as [`FileEntry::disk_path`]
+        /// but with the common prefix removed.
         pub(super) meta_path: PathBuf,
+        /// The length of the file in bytes.
         pub(super) length: u64,
+        /// Indicates whether the file is a padding file.
+        ///
+        /// Padding files do not exist in the real file system and are just simulated byte streams
+        /// of all zeros.
         pub(super) padding: bool,
     }
 
+    /// A RAII file manager for multithreaded hashing operations.
+    ///
+    /// For each thread that intends to use a file, a use should be "registered" via
+    /// [`FileManager::register_use`] to increase the internal counter. The files
+    /// are memory mapped lazily and provided to threads using [`MmapGuard`]. After the thread
+    /// drops the [`MmapGuard`], the use counter decreases by 1. When the counter reaches 0, the memory
+    /// map is dropped.
     #[derive(Debug)]
     pub(super) struct FileManager<'a> {
+        /// The files that will be used for hashing.
         files: &'a [FileEntry],
+        /// The vector of file states.
         states: Vec<Mutex<FileState>>,
     }
 
+    /// The file counter and the associated memory map if the file has already been acquired.
     #[derive(Debug, Default)]
     pub(super) struct FileState {
+        /// The number of registered uses for the file.
         uses: usize,
+        /// The file's memory map if it has already been acquired or [`None`] if it has not.
         mmap: Option<Arc<Mmap>>,
     }
 
+    /// A RAII guard that stores the [`Arc`] to the memory map for the duration of the read operation.
+    ///
+    /// When the guard is dropped, the corresponding [`FileState::uses`] counter reduces by 1. If it
+    /// reaches 0, the memory map is dropped.
     pub(super) struct MmapGuard<'a> {
+        /// The file's memory map.
         mmap: Arc<Mmap>,
+        /// The file state associated with the file being read.
         state: &'a Mutex<FileState>,
     }
 
@@ -804,6 +926,8 @@ mod utils {
     }
 
     impl Drop for MmapGuard<'_> {
+        /// Decreases the associated [`FileState::uses`] counter by 1. If the counter reaches 0,
+        /// [`FileState::mmap`] gets set to [`None`], which drops the underlying memory map.
         fn drop(&mut self) {
             let mut state = self.state.lock().unwrap();
             state.uses -= 1;
@@ -814,6 +938,7 @@ mod utils {
     }
 
     impl<'a> FileManager<'a> {
+        /// Creates a new [`FileManager`] from the given files.
         pub fn new(files: &'a [FileEntry]) -> Self {
             let states = std::iter::repeat_with(|| Mutex::new(FileState::default()))
                 .take(files.len())
@@ -821,11 +946,19 @@ mod utils {
             Self { files, states }
         }
 
+        /// Registers a use for the file.
+        ///
+        /// Once the file's memory map is loaded into RAM, it will not dropped until its use
+        /// counter is decreased to 0.
         pub fn register_use(&self, file_index: usize) {
             let mut state = self.states[file_index].lock().unwrap();
             state.uses += 1;
         }
 
+        /// Acquires the file's memory map.
+        ///
+        /// The memory maps are created lazily when this method is called for the first time
+        /// for a given file.
         pub fn acquire(&self, file_index: usize) -> Result<MmapGuard<'_>, Error> {
             let mut state = self.states[file_index].lock().unwrap();
 
@@ -848,8 +981,69 @@ mod utils {
     }
 }
 
+/// A path filter function.
 pub type FilterFn = Box<dyn Fn(&Path) -> bool + Send + Sync>;
 
+/// A typestate builder for constructing [`Torrent`]s from files on disk.
+///
+/// `TorrentBuilder` collects one or more paths, hashes the resulting files, and assembles a
+/// [`TorrentBuf`] in v1-only, v2-only, or hybrid form via [`build_v1`](TorrentBuilder::build_v1),
+/// [`build_v2`](TorrentBuilder::build_v2), or [`build_hybrid`](TorrentBuilder::build_hybrid)
+/// (aliased as [`build`](TorrentBuilder::build)). Any metadata field left unconfigured falls
+/// back to a sensible default when one of these is called; see [Defaults](#defaults) below.
+///
+/// # Typestate
+///
+/// The builder is generic over a `State` marker ([`state::Empty`] or [`state::HasPaths`]) that
+/// tracks whether at least one path has been supplied:
+///
+/// - **[`TorrentBuilder<state::Empty>`]** is the builder's starting state, produced by
+///   [`TorrentBuilder::new`] (or its [`Default`] impl). All metadata methods are available, but
+///   [`build`](TorrentBuilder::build) and its variants are not, since there are no files yet.
+/// - **[`TorrentBuilder<state::HasPaths>`]** is reached once a path has been supplied via
+///   [`add_path`](TorrentBuilder::add_path) or [`add_paths`](TorrentBuilder::add_paths). Only
+///   in this state can the torrent actually be built.
+///
+/// This makes building a torrent with no files a compile-time error rather than a runtime one.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> Result<(), Error> {
+/// let torrent = Torrent::builder()
+///     .name("my_torrent")
+///     .private(true)
+///     .add_tracker("https://tracker.example.com/announce".parse()?)
+///     .add_path("my_folder")
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Defaults
+///
+/// | Field | Default when unset | Set via |
+/// |---|---|---|
+/// | `name` | The lone file's name if there is exactly one file; otherwise the last path component of the files' common ancestor directory, if it can be canonicalized; otherwise the literal string `"New Torrent"`. | [`name`](TorrentBuilder::name) |
+/// | `piece_length` | Chosen automatically for roughly 1000 pieces: `total_length / 1000`, rounded down to the nearest power of two, clamped to `[16 KiB, 16 MiB]`. | [`piece_length`](TorrentBuilder::piece_length) |
+/// | `private` | `false` | [`private`](TorrentBuilder::private) |
+/// | `source` | `None` | [`source`](TorrentBuilder::source) |
+/// | tracker tiers | `None` (no trackers) — an empty tier list, or one containing only empty tiers, is normalized to `None`. | [`add_tracker`](TorrentBuilder::add_tracker), [`add_trackers`](TorrentBuilder::add_trackers), [`next_tracker_tier`](TorrentBuilder::next_tracker_tier) |
+/// | web seeds | `None` (no web seeds) | [`add_web_seed`](TorrentBuilder::add_web_seed), [`add_web_seeds`](TorrentBuilder::add_web_seeds) |
+/// | `creation_date` | The current Unix timestamp (seconds since the epoch) at build time. | [`creation_date`](TorrentBuilder::creation_date) |
+/// | `created_by` | `None` — not auto-populated with crate name or version. | [`created_by`](TorrentBuilder::created_by) |
+/// | `comment` | `None` | [`comment`](TorrentBuilder::comment) |
+/// | `encoding` | Always `"UTF-8"`; not configurable through the builder. | — |
+/// | `follow_symlinks` | `false` — symlinks encountered while traversing directories are not followed. | [`follow_symlinks`](TorrentBuilder::follow_symlinks) |
+/// | path filters | None — no files are excluded from traversal. | [`add_filter`](TorrentBuilder::add_filter) |
+///
+/// # Piece length constraints
+///
+/// [`build_v2`](TorrentBuilder::build_v2) and [`build_hybrid`](TorrentBuilder::build_hybrid)
+/// (and therefore [`build`](TorrentBuilder::build), which calls `build_hybrid`) require the
+/// piece length — explicit or defaulted — to be a power of two of at least 16 KiB (16384
+/// bytes), per BitTorrent v2. A violation returns [`Error::InvalidPieceLengthV2`].
+/// [`build_v1`](TorrentBuilder::build_v1) has no such restriction.
 pub struct TorrentBuilder<State> {
     paths: Vec<PathBuf>,
     filters: Vec<FilterFn>,
@@ -862,60 +1056,76 @@ pub struct TorrentBuilder<State> {
 // ── Methods available in both states ────────────────────────────────────────
 
 impl<T> TorrentBuilder<T> {
+    /// Sets the custom name for the torrent.
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
+    /// Sets the piece length for the torrent.
+    ///
+    /// Note that in v2-only and hybrid torrents, the piece length must be
+    /// a power of two and at least 16 KiB (16384). Torrent building will fail
+    /// if these conditions are not satisfied.
     #[must_use]
     pub fn piece_length(mut self, piece_length: NonZeroU64) -> Self {
         self.common_fields.piece_length = Some(piece_length);
         self
     }
 
+    /// Changes whether the torrent is private.
     #[must_use]
     pub fn private(mut self, private: bool) -> Self {
         self.common_fields.private = private;
         self
     }
 
+    /// Sets the value of the `source` field in the torrent.
     #[must_use]
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.common_fields.source = Some(source.into());
         self
     }
 
+    /// Sets the creation date of the torrent.
     #[must_use]
     pub fn creation_date(mut self, creation_date: u64) -> Self {
         self.common_fields.creation_date = Some(creation_date);
         self
     }
 
+    /// Sets the value of the `created by` field in the torrent.
     #[must_use]
     pub fn created_by(mut self, created_by: impl Into<String>) -> Self {
         self.common_fields.created_by = Some(created_by.into());
         self
     }
 
+    /// Adds the comment to the torrent.
     #[must_use]
     pub fn comment(mut self, comment: impl Into<String>) -> Self {
         self.common_fields.comment = Some(comment.into());
         self
     }
 
+    /// Adds a tracker URL to the current tracker tier.
     #[must_use]
     pub fn add_tracker(mut self, tracker: Url) -> Self {
         self.last_tracker_tier_mut().0.push(tracker);
         self
     }
 
+    /// Adds several tracker URLs to the current tracker tier.
     #[must_use]
     pub fn add_trackers<I: IntoIterator<Item = Url>>(mut self, trackers: I) -> Self {
         self.last_tracker_tier_mut().0.extend(trackers);
         self
     }
 
+    /// Starts a new tracker tier.
+    ///
+    /// No-op if the current tracker tier is empty.
     #[must_use]
     pub fn next_tracker_tier(mut self) -> Self {
         if !self.last_tracker_tier_mut().is_empty() {
@@ -926,18 +1136,35 @@ impl<T> TorrentBuilder<T> {
         self
     }
 
+    /// Adds a web seed to the torrent.
     #[must_use]
     pub fn add_web_seed(mut self, seed: Url) -> Self {
         self.common_fields.web_seeds.push(seed);
         self
     }
 
+    /// Adds several web seeds to the torrent.
     #[must_use]
     pub fn add_web_seeds<I: IntoIterator<Item = Url>>(mut self, seeds: I) -> Self {
         self.common_fields.web_seeds.extend(seeds);
         self
     }
 
+    /// Adds a path filter function to this builder.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Error> {
+    /// let torrent = Torrent::builder()
+    ///     .add_path("my_folder")
+    ///     .add_filter(|path| path.file_name().is_some_and(|name| name != ".gitignore"))
+    ///     .build()?;
+    ///
+    /// // Do something else...
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn add_filter<F>(mut self, filter: F) -> Self
     where
@@ -947,17 +1174,41 @@ impl<T> TorrentBuilder<T> {
         self
     }
 
+    /// Adds a path to this builder for reading.
+    ///
+    /// The path can either represent a file or a directory.
+    /// If it represents a directory, it will be traversed recursively for files.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Error> {
+    /// let torrent = Torrent::builder()
+    ///     .add_path("my_file.txt")
+    ///     .add_path("my_folder") // recursively traversed
+    ///     .build()?;
+    /// // Do something else...
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
     pub fn add_path(mut self, path: impl Into<PathBuf>) -> TorrentBuilder<HasPaths> {
         self.paths.push(path.into());
         self.into_state()
     }
 
+    /// Tells the builder whether the builder should follow the symlinks it encounters
+    /// during path traversals.
+    ///
+    /// The default value is `false`.
     #[must_use]
     pub fn follow_symlinks(mut self, follow_symlinks: bool) -> Self {
         self.follow_symlinks = follow_symlinks;
         self
     }
 
+    /// Gets a mutable reference to the last tracker tier. If the tracker tier list is empty,
+    /// a tracker tier is created.
     fn last_tracker_tier_mut(&mut self) -> &mut TrackerTier {
         if self.common_fields.tracker_tiers.is_empty() {
             self.common_fields
@@ -967,6 +1218,8 @@ impl<T> TorrentBuilder<T> {
         self.common_fields.tracker_tiers.last_mut().unwrap()
     }
 
+    /// Converts the builder from one state to another while preserving the values
+    /// of all fields.
     fn into_state<S>(self) -> TorrentBuilder<S> {
         TorrentBuilder {
             paths: self.paths,
@@ -988,6 +1241,12 @@ impl Default for TorrentBuilder<state::Empty> {
 }
 
 impl TorrentBuilder<state::Empty> {
+    /// Creates an empty builder.
+    ///
+    /// At least one path must be supplied to the builder via [`TorrentBuilder::add_path`] or
+    /// [`TorrentBuilder::add_paths`] to enable [torrent building](TorrentBuilder::build).
+    ///
+    /// This is equivalent to [`Torrent::builder`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -1009,6 +1268,26 @@ impl TorrentBuilder<state::Empty> {
         }
     }
 
+    /// Adds several paths to the builder for reading.
+    ///
+    /// The paths can either represent files or directories.
+    /// Each one representing a directory will be traversed recursively for files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoPaths`] if an empty iterator was supplied.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Error> {
+    /// let torrent = Torrent::builder()
+    ///     .add_paths(["my_file.txt", "my_folder"])?
+    ///     .build()?;
+    /// // Do something else...
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(
         mut self,
         paths: I,
@@ -1026,23 +1305,60 @@ impl TorrentBuilder<state::Empty> {
 // ── HasPaths state ───────────────────────────────────────────────────────────
 
 impl TorrentBuilder<state::HasPaths> {
+    /// Creates a builder initialized with a path.
+    ///
+    /// This is equivalent to calling [`TorrentBuilder::add_path`] on an empty [`TorrentBuilder`].
     pub fn from_path(path: impl Into<PathBuf>) -> Self {
         TorrentBuilder::new().add_path(path)
     }
 
+    /// Creates a builder initialized with several paths.
+    ///
+    /// This is equivalent to calling [`TorrentBuilder::add_paths`] on an empty [`TorrentBuilder`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoPaths`] if an empty iterator was supplied.
     pub fn from_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(paths: I) -> Result<Self, Error> {
         TorrentBuilder::new().add_paths(paths)
     }
 
+    /// Adds several paths to the builder for reading.
+    ///
+    /// The paths can either represent files or directories.
+    /// Each one representing a directory will be traversed recursively for files.
+    ///
+    /// Unlike its counterpart in `TorrentBuilder<Empty>`, this one is infallible and a no-op if
+    /// an empty iterator was supplied.
+    #[must_use]
     pub fn add_paths<I: IntoIterator<Item = impl Into<PathBuf>>>(mut self, paths: I) -> Self {
         self.paths.extend(paths.into_iter().map(Into::into));
         self
     }
 
+    /// Builds a hybrid torrent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`enum@Error`] in the following cases:
+    /// - No files were found after traversing all of the supplied paths;
+    /// - An I/O error occurred;
+    /// - A path traversal error occurred;
+    /// - One of the file paths was not a valid UTF-8 (this is required by BitTorrent specs);
+    /// - One of the file paths represented neither a file nor a directory and was not a symlink;
+    /// - The piece length or one of the provided files was too large (32-bit systems only);
+    ///
+    /// Also returns an [`Error::InvalidPieceLengthV2`] if the piece length was invalid according to BitTorrent v2.
+    /// See [`TorrentBuilder::build_v2`] for more information.
     pub fn build(self) -> Result<TorrentBuf, Error> {
         self.build_hybrid()
     }
 
+    /// Builds a v1-only torrent.
+    ///
+    /// # Errors
+    ///
+    /// See [`TorrentBuilder::build`] (except [`Error::InvalidPieceLengthV2`]).
     pub fn build_v1(self) -> Result<TorrentBuf, Error> {
         let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
         let single_file = files.len() == 1;
@@ -1068,6 +1384,11 @@ impl TorrentBuilder<state::HasPaths> {
         ))
     }
 
+    /// Builds a v2-only torrent.
+    ///
+    /// # Errors
+    ///
+    /// See [`TorrentBuilder::build`].
     pub fn build_v2(self) -> Result<TorrentBuf, Error> {
         let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
         let single_file = files.len() == 1;
@@ -1096,6 +1417,13 @@ impl TorrentBuilder<state::HasPaths> {
         ))
     }
 
+    /// Builds a hybrid torrent.
+    ///
+    /// This is equivalent to [`TorrentBuilder::build`].
+    ///
+    /// # Errors
+    ///
+    /// See [`TorrentBuilder::build`].
     pub fn build_hybrid(self) -> Result<TorrentBuf, Error> {
         let mut files = resolve_file_paths(self.paths, &self.filters, self.follow_symlinks)?;
         let single_file = files.len() == 1;
@@ -1129,37 +1457,52 @@ impl TorrentBuilder<state::HasPaths> {
     }
 }
 
+/// Errors that can arise while building torrents.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// An I/O error occurred.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// An path traversal error occurred.
     #[error("Error while walking a directory: {0}")]
     WalkDir(#[from] walkdir::Error),
 
-    #[error("No paths were provided to `add_paths`")]
+    /// An empty iterator was provided to an empty torrent builder.
+    #[error("An empty iterator provided to `add_paths`")]
     NoPaths,
 
+    /// No files were found after traversing all of the provided paths.
     #[error("No files were found after traversal")]
     NoFiles,
 
+    /// A file or a directory path was not valid UTF-8 as required by BitTorrent specs.
     #[error("File/directory name is not valid UTF-8")]
     NonUtf8Name,
 
+    /// A path represented neither a file, a directory, nor a symlink.
     #[error("Unsupported file type: {0}")]
     UnsupportedFileType(PathBuf),
 
+    /// The length of the file was too large for the platform address space (32-bit systems only).
     #[error("file length {0} is too large for the platform address space")]
     FileTooLarge(u64),
 
+    /// The files were too large for the give piece length on this platform (32-bit systems only).
     #[error(
         "Files cannot be processed with the given piece length in this platform address space: {0}"
     )]
     TorrentTooLargeForPlatform(usize),
 
+    /// The provided piece length was invalid for a v2-only or hybrid torrent.
+    ///
+    /// Per BitTorrent v2, the piece length must be a power of two and at least 16 KiB (16384 bytes).
     #[error("Piece length must be a power of two and at least 16 KiB in BitTorrent v2: {0}")]
     InvalidPieceLengthV2(NonZeroU64),
 
-    #[error("The provided piece length is too large (does not fit in usize): {0}")]
+    /// The provided piece length was too large for this platform, i.e. exceeded [`usize::MAX`].
+    ///
+    /// This can happen only on 32-bit systems for legitimate torrents.
+    #[error("The provided piece length is too large: {0}")]
     PieceLengthTooLarge(NonZeroU64),
 }

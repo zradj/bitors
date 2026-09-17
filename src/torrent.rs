@@ -324,9 +324,9 @@ pub struct InfoV1<'a> {
     /// SHA-1 hashes of all pieces appended together.
     ///
     /// Each hash is 20 bytes long. In v1, all files are merged into one byte stream, which is
-    /// then divided into pieces of length [`Info::piece_length`] and hashed.
-    /// This means the pieces can span across file boundaries. The hashes should be verified for each
-    /// piece during downloading.
+    /// then divided into pieces of length [`Info::piece_length`] each (except probably for the last one,
+    /// which may be smaller) and hashed. This means the pieces can span across file boundaries. The hashes
+    /// should be verified for each piece during downloading.
     pub pieces: Cow<'a, [[u8; 20]]>,
     /// Contains file information for this torrent.
     pub file_mode: FileMode<'a>,

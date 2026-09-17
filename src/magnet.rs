@@ -112,14 +112,14 @@ impl fmt::Display for MagnetLink {
                 vec![0u8; 40]
             };
             let encoding = if self.v1_base32 { BASE32 } else { HEXLOWER };
-            encoding.encode_mut(info_hash_v1, &mut buf);
+            encoding.encode_mut(&info_hash_v1, &mut buf);
 
             write!(f, "?xt=urn:btih:{}", std::str::from_utf8(&buf).unwrap())?;
         }
 
         if let Some(info_hash_v2) = self.info_hashes.v2() {
             let mut buf = [0u8; 64];
-            HEXLOWER.encode_mut(info_hash_v2, &mut buf);
+            HEXLOWER.encode_mut(&info_hash_v2, &mut buf);
 
             let prefix = if self.info_hashes.v1().is_some() {
                 '&'
@@ -169,7 +169,7 @@ impl MagnetLink {
     ///
     /// This is the preferred option by some clients.
     ///
-    /// No-op if the v1 hash is not present in the magnet link.
+    /// No-op if there is no v1 hash.
     ///
     /// # Examples
     ///
@@ -190,18 +190,18 @@ impl MagnetLink {
 impl InfoHashes {
     /// Returns the v1 info hash of a v1-only or hybrid torrent. Returns [`None`] if the torrent is v2-only.
     #[must_use]
-    pub fn v1(&self) -> Option<&[u8; 20]> {
+    pub fn v1(&self) -> Option<[u8; 20]> {
         match self {
-            Self::V1(v1) | Self::Hybrid { v1, .. } => Some(v1),
+            Self::V1(v1) | Self::Hybrid { v1, .. } => Some(*v1),
             Self::V2(_) => None,
         }
     }
 
     /// Returns the v2 info hash of a v2-only or hybrid torrent. Returns [`None`] if the torrent is v1-only.
     #[must_use]
-    pub fn v2(&self) -> Option<&[u8; 32]> {
+    pub fn v2(&self) -> Option<[u8; 32]> {
         match self {
-            Self::V2(v2) | Self::Hybrid { v2, .. } => Some(v2),
+            Self::V2(v2) | Self::Hybrid { v2, .. } => Some(*v2),
             Self::V1(_) => None,
         }
     }
