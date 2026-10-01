@@ -1,3 +1,30 @@
+//! [Magnet links](https://en.wikipedia.org/wiki/Magnet_URI_scheme) for torrents.
+//!
+//! A magnet link identifies a torrent by its info hash instead of by a metainfo file, so peers can
+//! be found (for example through the DHT) without a `.torrent` file at hand. This module provides:
+//!
+//! - [`MagnetLink`], which holds the data of a magnet link and formats it as a URI through its
+//!   [`Display`](std::fmt::Display) implementation.
+//! - [`InfoHashes`], which holds the v1 info hash, the v2 info hash, or both, depending on the
+//!   version of the torrent.
+//!
+//! The usual way to obtain a [`MagnetLink`] is [`Torrent::magnet_link`], which fills in the info
+//! hash(es), the name, the total size, and the trackers. A link that only carries the info hash
+//! can be created with [`MagnetLink::new`].
+//!
+//! # Examples
+//!
+//! ```
+//! use bitors::magnet::{InfoHashes, MagnetLink};
+//!
+//! let link = MagnetLink::new(InfoHashes::V1([0xab; 20]));
+//!
+//! assert_eq!(
+//!     link.to_string(),
+//!     "magnet:?xt=urn:btih:abababababababababababababababababababab"
+//! );
+//! ```
+
 use std::fmt::{self};
 
 use data_encoding::{BASE32, HEXLOWER};
@@ -58,7 +85,12 @@ pub enum InfoHashes {
     /// The info hash of a v2-only torrent.
     V2([u8; 32]),
     /// The v1 and v2 info hashes of a hybrid torrent.
-    Hybrid { v1: [u8; 20], v2: [u8; 32] },
+    Hybrid {
+        /// The SHA-1 info hash of the v1 `info` dictionary.
+        v1: [u8; 20],
+        /// The SHA-256 info hash of the v2 `info` dictionary.
+        v2: [u8; 32],
+    },
 }
 
 impl From<&Torrent<'_>> for MagnetLink {

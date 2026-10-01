@@ -1,11 +1,12 @@
 [package]
 name = "bitors"
-version = "3.1.2"
+version = "4.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "A crate for parsing and creating BitTorrent metainfo files (`.torrent`)"
 repository = "https://github.com/zradj/bitors"
+readme = "README.md"
 categories = ["encoding", "parser-implementations", "filesystem"]
 keywords = ["bittorrent", "torrent", "bencode", "metainfo", "p2p"]
 

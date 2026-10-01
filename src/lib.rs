@@ -1,4 +1,6 @@
+#![doc = include_str!("../README.md")]
 #![warn(clippy::pedantic)]
+#![warn(missing_docs)]
 
 pub mod bencode;
 pub mod error;
@@ -21,9 +23,10 @@ use crate::error::Error;
 /// # Examples
 ///
 /// ```no_run
-/// # use std::fs::File;
-/// # fn main() -> Result<(), Error> {
-/// let file = File::open("my_torrent.torrent")?;
+/// # use std::{error::Error, fs::File, io::Read};
+/// # use bitors::parse_torrent;
+/// # fn main() -> Result<(), Box<dyn Error>> {
+/// let mut file = File::open("my_torrent.torrent")?;
 /// let mut data = vec![];
 /// file.read_to_end(&mut data)?;
 ///
@@ -36,7 +39,7 @@ use crate::error::Error;
 ///
 /// # Errors
 ///
-/// Returns an error if `data` is not valid bencode, or if the the decoded
+/// Returns an error if `data` is not valid bencode, or if the decoded
 /// structure does not represent a valid torrent metainfo file.
 pub fn parse_torrent(data: &[u8]) -> Result<Torrent<'_>, Error> {
     Ok(Torrent::try_from(Parser::new(data).parse()?)?)

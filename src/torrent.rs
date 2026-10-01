@@ -1,3 +1,45 @@
+//! Torrent metainfo.
+//!
+//! This module contains [`Torrent`], the in-memory representation of a `.torrent` file, and the
+//! types that make it up. They follow the layout of the metainfo file as described by
+//! [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) (v1),
+//! [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) (v2), and
+//! [BEP 47](https://www.bittorrent.org/beps/bep_0047.html) (file attributes).
+//!
+//! # Structure
+//!
+//! - [`Torrent`] holds the optional top-level fields (trackers, web seeds, creation date, and so
+//!   on) and a [`TorrentMeta`].
+//! - [`TorrentMeta`] is an enum with one variant per BitTorrent version (v1-only, v2-only, and
+//!   hybrid). It holds the `info` dictionary as an [`Info`] and, for v2 and hybrid torrents, the
+//!   `piece layers` as [`PieceLayers`].
+//! - [`Info`] holds the fields common to all versions and a `kind` field with the version-specific
+//!   ones: [`InfoV1`], [`InfoV2`], or [`InfoHybrid`].
+//! - v1 describes files with [`FileMode`] and [`FileInfo`]; v2 describes them with a
+//!   [`FileTree`] made of [`FileTreeNode`]s and [`FileLeaf`]s.
+//!
+//! # Parsing and building
+//!
+//! A [`Torrent`] is obtained in one of three ways:
+//!
+//! - [`parse_torrent`](crate::parse_torrent) parses raw data directly.
+//! - [`Torrent::try_from`] converts a [`Bencode`] element that was parsed earlier with
+//!   [`Parser`](crate::bencode::Parser).
+//! - [`Torrent::builder`] returns a [`TorrentBuilder`] that hashes files on disk (see the
+//!   [`builder`] module).
+//!
+//! # Borrowed and owned torrents
+//!
+//! A parsed [`Torrent<'a>`](Torrent) borrows from the buffer it was parsed from. To keep it after
+//! the buffer is gone, call [`Torrent::into_owned`](IntoOwned::into_owned), which returns the
+//! owned type [`TorrentBuf`]. Every borrowed type has an owned counterpart with the `Buf` suffix
+//! (for example [`InfoBuf`] and [`FileTreeBuf`]), and [`IntoOwned`] is the trait that connects
+//! them.
+//!
+//! # Errors
+//!
+//! Failures while converting [`Bencode`] into a [`Torrent`] are reported as [`enum@Error`].
+
 pub mod builder;
 
 use bitflags::bitflags;
@@ -52,7 +94,7 @@ pub type FileLeafBuf = FileLeaf<'static>;
 ///
 /// This function returns [`Some`] if all fields were present and [`None`] if none were.
 /// In the case of an inconsistent state (some fields were present and some were not), an
-/// [`Error`] is returned.
+/// [`enum@Error`] is returned.
 fn extract_info_v1_fields<'a>(
     dict: &mut BTreeMap<&'a [u8], Bencode<'a>>,
 ) -> Result<Option<InfoV1<'a>>, Error> {
@@ -106,7 +148,7 @@ fn extract_info_v1_fields<'a>(
 ///
 /// This function returns [`Some`] if all fields were present and [`None`] if none were.
 /// In the case of an inconsistent state (some fields were present and some were not), an
-/// [`Error`] is returned.
+/// [`enum@Error`] is returned.
 fn extract_info_v2_fields<'a>(
     dict: &mut BTreeMap<&'a [u8], Bencode<'a>>,
 ) -> Result<Option<InfoV2<'a>>, Error> {
@@ -148,15 +190,15 @@ trait DictExt<'a> {
     fn opt(&mut self, key: &[u8]) -> Option<Bencode<'a>>;
 
     /// Retrieve a required [`Bencode`] element from the map, returning an
-    /// [`Error`] if it is not present.
+    /// [`enum@Error`] if it is not present.
     fn require(&mut self, key: &[u8]) -> Result<Bencode<'a>, Error>;
 
     /// Optionally retrieve a [`Bencode`] element and convert it to [`str`].
-    /// Returns an [`Error`] if the element is not valid UTF-8.
+    /// Returns an [`enum@Error`] if the element is not valid UTF-8.
     fn opt_str(&mut self, key: &[u8]) -> Result<Option<&'a str>, Error>;
 
     /// Retrieve a required [`Bencode`] element from the map, converting it to [`str`].
-    /// Returns an [`Error`] if it the element is not present in the map or if it is not
+    /// Returns an [`enum@Error`] if the element is not present in the map or if it is not
     /// valid UTF-8.
     fn require_str(&mut self, key: &[u8]) -> Result<&'a str, Error>;
 }
@@ -648,10 +690,10 @@ impl Torrent<'_> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use crate::torrent::builder::Error;
+    /// # use bitors::{Torrent, torrent::builder::Error};
     /// # fn main() -> Result<(), Error> {
     /// let torrent = Torrent::builder()
-    ///     .add_path("my_folder");
+    ///     .add_path("my_folder")
     ///     .build()?;
     /// // Do something else...
     /// # Ok(())
@@ -990,7 +1032,7 @@ pub struct PieceLayers<'a>(
 ///
 /// 1. **Single:** The torrent contains only one file. The `info` dictionary contains
 ///    the fields `length` and optionally `md5sum`.
-/// 2. **Multi:** The torrent contains several files. The `info dictionary` contains the
+/// 2. **Multi:** The torrent contains several files. The `info` dictionary contains the
 ///    field `files`, which is a list of dictionaries that contain information about each
 ///    downloadable file. These dictionaries are represented as [`FileInfo`] in this crate.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1038,9 +1080,14 @@ bitflags! {
     /// and padding files.
     #[derive(Debug, PartialEq, Eq, Clone)]
     pub struct FileInfoAttrFlags: u8 {
+        /// The file is a symlink (`l`).
         const SYMLINK = 0b0001;
+        /// The file is executable (`x`).
         const EXEC = 0b0010;
+        /// The file is hidden (`h`).
         const HIDDEN = 0b0100;
+        /// The file is a padding file (`p`), which only exists to align the following file to
+        /// a piece boundary. Padding files contain zeros and are not written to disk.
         const PADDING = 0b1000;
     }
 }
@@ -1329,18 +1376,18 @@ impl TrackerTier {
     /// # Examples
     ///
     /// ```no_run
-    /// # fn main() -> Result<(), crate::Error> {
+    /// # use bitors::{error::Error, parse_torrent};
+    /// # fn main() -> Result<(), Error> {
     /// # let data = [0u8; 10];
     /// let torrent = parse_torrent(&data)?; // Assume we already read the torrent into `data`
     /// let mut first_tier = torrent.tracker_tiers.unwrap()[0].clone();
     /// first_tier.shuffle();
     ///
-    /// for tracker in &first_tier {
+    /// for tracker in &*first_tier {
     ///     // Do something here...
     /// }
     /// # Ok(())
     /// # }
-    ///
     /// ```
     pub fn shuffle(&mut self) {
         self.0.shuffle(&mut rand::rng());

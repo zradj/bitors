@@ -1,3 +1,41 @@
+//! Building new torrents from files on disk.
+//!
+//! The main type of this module is [`TorrentBuilder`], a typestate builder that collects paths and
+//! metadata, hashes the files, and produces a [`TorrentBuf`]. See its documentation for the
+//! available options and their defaults.
+//!
+//! A torrent can be built in three forms:
+//!
+//! - [`build_v1`](TorrentBuilder::build_v1) produces a v1-only torrent.
+//! - [`build_v2`](TorrentBuilder::build_v2) produces a v2-only torrent.
+//! - [`build_hybrid`](TorrentBuilder::build_hybrid), also available as
+//!   [`build`](TorrentBuilder::build), produces a hybrid torrent that works with both v1 and v2
+//!   clients.
+//!
+//! Hashing is the expensive part of building a torrent. Files are memory-mapped and split into
+//! pieces that are hashed in parallel with `rayon`; for v2 and hybrid torrents the per-file
+//! Merkle trees are computed as well.
+//!
+//! The module also contains the [`state`] markers used by the builder's typestate, [`FilterFn`]
+//! (the type of path filters), and [`enum@Error`], which describes everything that can go wrong
+//! while building.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use bitors::Torrent;
+//!
+//! # fn main() -> Result<(), bitors::torrent::builder::Error> {
+//! let torrent = Torrent::builder()
+//!     .comment("My first torrent")
+//!     .add_path("my_folder")
+//!     .build()?;
+//!
+//! println!("{}", torrent.magnet_link());
+//! # Ok(())
+//! # }
+//! ```
+
 use std::{
     borrow::Cow,
     fs::File,
@@ -354,13 +392,24 @@ mod field_builders {
     /// [`TorrentBuilder`]: super::TorrentBuilder
     #[derive(Debug)]
     pub(super) struct CommonFields {
+        /// The piece length chosen by the user, or [`None`] to pick one automatically based on
+        /// the total size of the files.
         pub(super) piece_length: Option<NonZeroU64>,
+        /// Whether the torrent is private.
         pub(super) private: bool,
+        /// The value of the `source` field, if set.
         pub(super) source: Option<String>,
+        /// The tracker tiers collected so far. The last tier is the one that new trackers are
+        /// added to. May be empty or contain empty tiers; these are dropped during resolution.
         pub(super) tracker_tiers: Vec<TrackerTier>,
+        /// The web seeds collected so far.
         pub(super) web_seeds: Vec<Url>,
+        /// The creation date in seconds since the Unix epoch, or [`None`] to use the current
+        /// time.
         pub(super) creation_date: Option<u64>,
+        /// The value of the `created by` field, if set.
         pub(super) created_by: Option<String>,
+        /// The value of the `comment` field, if set.
         pub(super) comment: Option<String>,
     }
 
@@ -373,14 +422,24 @@ mod field_builders {
     /// [`TorrentBuilder`]: super::TorrentBuilder
     #[derive(Debug)]
     pub(super) struct CommonFieldsResolved {
+        /// The piece length, either supplied by the user or computed from the total size of
+        /// the files.
         pub(super) piece_length: NonZeroU64,
+        /// Whether the torrent is private.
         pub(super) private: bool,
+        /// The value of the `source` field, if set.
         pub(super) source: Option<Cow<'static, str>>,
+        /// The non-empty tracker tiers, or [`None`] if there are no trackers.
         pub(super) tracker_tiers: Option<Vec<TrackerTier>>,
+        /// The web seeds, or [`None`] if there are none.
         pub(super) web_seeds: Option<Vec<Url>>,
+        /// The creation date in seconds since the Unix epoch. Always [`Some`] after resolution.
         pub(super) creation_date: Option<u64>,
+        /// The value of the `created by` field, if set.
         pub(super) created_by: Option<Cow<'static, str>>,
+        /// The value of the `comment` field, if set.
         pub(super) comment: Option<Cow<'static, str>>,
+        /// The torrent's encoding. Always `"UTF-8"`.
         pub(super) encoding: Option<Cow<'static, str>>,
     }
 
@@ -685,7 +744,7 @@ mod utils {
     /// The function requests metadata for each non-filtered path. If a path corresponds to a file,
     /// it is added as is. If a path corresponds to a directory, it is traversed using
     /// [`WalkDir`] to search for files. If a path corresponds to neither file nor directory,
-    /// an [`Error`] is returned. The function also propagates any [`WalkDir`] errors via [`Error`].
+    /// an [`enum@Error`] is returned. The function also propagates any [`WalkDir`] errors via [`enum@Error`].
     pub(super) fn resolve_file_paths(
         paths: Vec<PathBuf>,
         filters: &[FilterFn],
@@ -982,6 +1041,10 @@ mod utils {
 }
 
 /// A path filter function.
+///
+/// The function receives a path found during traversal and returns `true` to keep it or `false`
+/// to exclude it. Filters are added with [`TorrentBuilder::add_filter`]; a path is kept only if
+/// all filters accept it.
 pub type FilterFn = Box<dyn Fn(&Path) -> bool + Send + Sync>;
 
 /// A typestate builder for constructing [`Torrent`]s from files on disk.
@@ -1009,7 +1072,8 @@ pub type FilterFn = Box<dyn Fn(&Path) -> bool + Send + Sync>;
 /// # Examples
 ///
 /// ```no_run
-/// # fn main() -> Result<(), Error> {
+/// # use bitors::{Torrent, torrent::builder::Error};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let torrent = Torrent::builder()
 ///     .name("my_torrent")
 ///     .private(true)
@@ -1045,11 +1109,19 @@ pub type FilterFn = Box<dyn Fn(&Path) -> bool + Send + Sync>;
 /// bytes), per BitTorrent v2. A violation returns [`Error::InvalidPieceLengthV2`].
 /// [`build_v1`](TorrentBuilder::build_v1) has no such restriction.
 pub struct TorrentBuilder<State> {
+    /// The files and directories supplied by the user. Directories are traversed recursively
+    /// when the torrent is built.
     paths: Vec<PathBuf>,
+    /// The filters applied to the paths found during traversal. A path is excluded if any
+    /// filter rejects it.
     filters: Vec<FilterFn>,
+    /// The torrent name chosen by the user, or [`None`] to derive one from the files.
     name: Option<String>,
+    /// The fields shared by all torrent versions that were configured through the builder.
     common_fields: CommonFields,
+    /// Whether symlinks encountered during traversal are followed.
     follow_symlinks: bool,
+    /// Marks whether any paths have been supplied (see the [`state`] module).
     _state: PhantomData<State>,
 }
 
@@ -1155,6 +1227,7 @@ impl<T> TorrentBuilder<T> {
     /// # Examples
     ///
     /// ```no_run
+    /// # use bitors::{Torrent, torrent::builder::Error};
     /// # fn main() -> Result<(), Error> {
     /// let torrent = Torrent::builder()
     ///     .add_path("my_folder")
@@ -1182,6 +1255,7 @@ impl<T> TorrentBuilder<T> {
     /// # Examples
     ///
     /// ```no_run
+    /// # use bitors::{Torrent, torrent::builder::Error};
     /// # fn main() -> Result<(), Error> {
     /// let torrent = Torrent::builder()
     ///     .add_path("my_file.txt")
@@ -1235,6 +1309,7 @@ impl<T> TorrentBuilder<T> {
 // ── Empty state ──────────────────────────────────────────────────────────────
 
 impl Default for TorrentBuilder<state::Empty> {
+    /// Creates an empty builder. Equivalent to [`TorrentBuilder::new`].
     fn default() -> Self {
         Self::new()
     }
@@ -1280,6 +1355,7 @@ impl TorrentBuilder<state::Empty> {
     /// # Examples
     ///
     /// ```no_run
+    /// # use bitors::{Torrent, torrent::builder::Error};
     /// # fn main() -> Result<(), Error> {
     /// let torrent = Torrent::builder()
     ///     .add_paths(["my_file.txt", "my_folder"])?
@@ -1464,7 +1540,7 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// An path traversal error occurred.
+    /// A path traversal error occurred.
     #[error("Error while walking a directory: {0}")]
     WalkDir(#[from] walkdir::Error),
 
@@ -1488,7 +1564,7 @@ pub enum Error {
     #[error("file length {0} is too large for the platform address space")]
     FileTooLarge(u64),
 
-    /// The files were too large for the give piece length on this platform (32-bit systems only).
+    /// The files were too large for the given piece length on this platform (32-bit systems only).
     #[error(
         "Files cannot be processed with the given piece length in this platform address space: {0}"
     )]

@@ -1,3 +1,37 @@
+//! [Bencode](https://en.wikipedia.org/wiki/Bencode) values, parsing, and encoding.
+//!
+//! Bencode is the serialization format used by BitTorrent for `.torrent` files and tracker
+//! responses. This module provides:
+//!
+//! - [`Bencode`], a value type with one variant per bencode data type (integer, byte string,
+//!   list, and dictionary). It borrows its byte strings and dictionary keys from the input.
+//! - [`Parser`], a zero-copy parser that validates the input against the rules of
+//!   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding) and limits the nesting
+//!   depth.
+//! - Encoding methods on [`Bencode`] ([`encode`](Bencode::encode),
+//!   [`encode_extend`](Bencode::encode_extend), and
+//!   [`encode_to_writer`](Bencode::encode_to_writer)).
+//! - `From` implementations that serialize [`Torrent`] and the types it is made of into
+//!   [`Bencode`]. Torrents are written back out through these, and info hashes are computed from
+//!   them.
+//! - [`enum@Error`], which describes everything that can go wrong while parsing or reading values out
+//!   of a [`Bencode`] element.
+//!
+//! Dictionaries are stored in a [`BTreeMap`], so they are always
+//! encoded with their keys in sorted order, as BEP 3 requires.
+//!
+//! # Examples
+//!
+//! ```
+//! use bitors::bencode::{Bencode, Parser};
+//!
+//! let bencode = Parser::new(b"d3:bar4:spam3:fooi42ee").parse().unwrap();
+//! let dict = bencode.as_dict().unwrap();
+//!
+//! assert_eq!(dict[&b"foo"[..]], Bencode::Int(42));
+//! assert_eq!(bencode.encode(), b"d3:bar4:spam3:fooi42ee");
+//! ```
+
 use std::{
     collections::BTreeMap,
     io::{self, Write},
@@ -55,7 +89,7 @@ fn insert_info_common_fields<'a, T: IntoOwned>(
 ) {
     dict.insert(b"name", Bencode::Bytes(info.name.as_bytes()));
     // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-    // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+    // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
     // approaches that size.
     #[allow(clippy::cast_possible_wrap)]
     dict.insert(
@@ -84,7 +118,7 @@ fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a 
     match &info.file_mode {
         FileMode::Single { length, md5sum } => {
             // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-            // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+            // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
             // approaches that size.
             #[allow(clippy::cast_possible_wrap)]
             dict.insert(b"length", Bencode::Int(*length as i64));
@@ -289,7 +323,7 @@ impl<'a> From<&'a Info<'a, InfoHybrid<'a>>> for Bencode<'a> {
     /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
     ///   See the `From<&FileMode>` implementation on [`Bencode`] for more information.
     ///
-    /// The v2-specific fields are `file tree` and `meta version` (always 2). See the`From<&FileTree>`
+    /// The v2-specific fields are `file tree` and `meta version` (always 2). See the `From<&FileTree>`
     /// implementation on [`Bencode`] for more information on the `file tree` field.
     fn from(info: &'a Info<'a, InfoHybrid<'a>>) -> Self {
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
@@ -320,7 +354,7 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
         }
 
         // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
         // approaches that size.
         #[allow(clippy::cast_possible_wrap)]
         dict.insert(b"length", Self::Int(file_info.length as i64));
@@ -402,7 +436,7 @@ impl<'a> From<&'a FileLeaf<'a>> for Bencode<'a> {
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
 
         // Lengths are `u64`; Bencode integers are `i64`. A file larger than
-        // i64::MAX (≈ 9.2 EB) cannot be represented, but no real torrent
+        // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
         // approaches that size.
         #[allow(clippy::cast_possible_wrap)]
         dict.insert(b"length", Self::Int(leaf.length as i64));
@@ -645,7 +679,7 @@ impl<'a> Bencode<'a> {
 /// # fn main() -> Result<(), Box<dyn Error>> {
 /// let mut file = File::open("my_torrent.torrent")?;
 /// let mut data = vec![];
-/// file.read_to_end(&mut data);
+/// file.read_to_end(&mut data)?;
 ///
 /// let mut parser = Parser::new(&data);
 /// let torrent = Torrent::try_from(parser.parse()?)?;
@@ -734,7 +768,7 @@ impl<'a> Parser<'a> {
     }
 
     /// An internal parsing method that tracks the current nesting depth. See [`Parser::parse`]
-    /// for more information,
+    /// for more information.
     fn parse_internal(&mut self, depth: usize) -> Result<Bencode<'a>, Error> {
         if depth > self.max_depth {
             return Err(Error::DepthLimitExceeded);
