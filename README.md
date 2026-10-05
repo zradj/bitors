@@ -1,4 +1,4 @@
-# bitors
+# <ins>BitTor</ins>rent for <ins>R</ins>u<ins>s</ins>t (bitors)
 
 A Rust crate for parsing and creating BitTorrent metainfo files (`.torrent`).
 
