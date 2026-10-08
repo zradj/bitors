@@ -521,8 +521,6 @@ mod field_builders {
             files_pad.push(last.clone());
         }
 
-        let single_file = single_file && (files_pad.len() == files.len());
-
         let file_manager = FileManager::new(&files_pad);
         for &pad_idx in &v1_to_v2_ids {
             if files_pad[pad_idx].length > 0 {
