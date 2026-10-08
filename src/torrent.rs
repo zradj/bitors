@@ -480,27 +480,34 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
             }
         };
 
-        let tracker = dict
-            .opt_str(b"announce")?
-            .map(|s| Url::parse(&s))
-            .transpose()?;
+        // `None` if this field is absent or if the content cannot be parsed.
+        let tracker = dict.opt_str(b"announce")?.and_then(|s| Url::parse(&s).ok());
 
-        let tracker_tiers = dict
-            .opt(b"announce-list")
-            .map(|b| {
+        let tracker_tiers = match dict.opt(b"announce-list") {
+            Some(b) => Some(
                 b.as_list()?
                     .iter()
-                    .map(|b| -> Result<TrackerTier, Error> {
+                    .map(|b| {
+                        // We raise an error if there is anything in the list other than strings, but ignore
+                        // invalid URLs.
                         let tracker_tier = b
                             .as_list()?
                             .iter()
-                            .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
+                            .map(|b| b.as_str().map(|s| Url::parse(s).ok()))
+                            .filter_map(Result::transpose)
                             .collect::<Result<Vec<Url>, _>>()?;
-                        Ok(TrackerTier(tracker_tier))
+
+                        if tracker_tier.is_empty() {
+                            Ok(None)
+                        } else {
+                            Ok(Some(TrackerTier(tracker_tier)))
+                        }
                     })
-                    .collect::<Result<Vec<TrackerTier>, _>>()
-            })
-            .transpose()?;
+                    .filter_map(Result::transpose)
+                    .collect::<Result<Vec<TrackerTier>, Error>>()?,
+            ),
+            None => None,
+        };
 
         let tracker_tiers = match (tracker, tracker_tiers) {
             (_, Some(tracker_tiers)) => Some(tracker_tiers),
@@ -508,15 +515,27 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
             (None, None) => None,
         };
 
-        let web_seeds = dict
-            .opt(b"url-list")
-            .map(|b| {
-                b.as_list()?
+        let web_seeds = match dict.opt(b"url-list") {
+            // We raise an error if there is anything other than strings, but ignore
+            // invalid URLs.
+            Some(b) => Some(match b {
+                Bencode::Bytes(_) => {
+                    let value = b.as_str()?;
+                    if let Ok(url) = Url::parse(value) {
+                        vec![url]
+                    } else {
+                        vec![]
+                    }
+                }
+                Bencode::List(list) => list
                     .iter()
-                    .map(|b| Ok::<Url, Error>(Url::parse(b.as_str()?)?))
-                    .collect::<Result<Vec<Url>, _>>()
-            })
-            .transpose()?;
+                    .map(|item| item.as_str().map(|s| Url::parse(s).ok()))
+                    .filter_map(Result::transpose)
+                    .collect::<Result<Vec<Url>, _>>()?,
+                _ => return Err(Error::IllegalFieldValue("url-list")),
+            }),
+            None => None,
+        };
 
         let creation_date = dict
             .opt(b"creation date")
