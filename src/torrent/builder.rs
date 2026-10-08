@@ -38,6 +38,7 @@
 
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     fs::File,
     marker::PhantomData,
     num::NonZeroU64,
@@ -377,10 +378,10 @@ mod field_builders {
     };
 
     use super::{
-        Cow, Error, FileInfo, FileInfoAttr, FileInfoAttrFlags, FileLeaf, FileMode, FileTree,
-        FileTreeNode, InfoV1, InfoV1Buf, InfoV2, InfoV2Buf, IntoParallelRefIterator, NonZeroU64,
-        ParallelIterator, Path, PathBuf, PieceLayers, PieceLayersBuf, SystemTime, UNIX_EPOCH,
-        V2FileHashes,
+        BTreeMap, Cow, Error, FileInfo, FileInfoAttr, FileInfoAttrFlags, FileLeaf, FileMode,
+        FileTree, FileTreeNode, InfoV1, InfoV1Buf, InfoV2, InfoV2Buf, IntoParallelRefIterator,
+        NonZeroU64, ParallelIterator, Path, PathBuf, PieceLayers, PieceLayersBuf, SystemTime,
+        UNIX_EPOCH, V2FileHashes,
     };
 
     /// Unprocessed fields common for both versions of BitTorrent. For more information on
@@ -641,6 +642,7 @@ mod field_builders {
                     length: file.length,
                     md5sum: None,
                     path: comps.into_iter().map(Cow::Owned).collect(),
+                    extra: BTreeMap::new(),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -699,6 +701,7 @@ mod field_builders {
                 FileTreeNode::File(FileLeaf {
                     length: file.length,
                     pieces_root,
+                    extra: BTreeMap::new(),
                 }),
             );
 
@@ -726,8 +729,8 @@ mod utils {
     use crate::torrent::builder::{FilterFn, field_builders::CommonFieldsResolved};
 
     use super::{
-        Cow, Error, File, Info, InfoHybrid, InfoV1Buf, InfoV2Buf, NonZeroU64, Path, PathBuf,
-        PieceLayersBuf, Torrent, TorrentBuf, TorrentMeta, clean,
+        BTreeMap, Cow, Error, File, Info, InfoHybrid, InfoV1Buf, InfoV2Buf, NonZeroU64, Path,
+        PathBuf, PieceLayersBuf, Torrent, TorrentBuf, TorrentMeta, clean,
     };
 
     /// Attempts to convert a [`NonZeroU64`] `piece_length` to [`usize`].
@@ -886,9 +889,10 @@ mod utils {
                 info: Info {
                     name,
                     piece_length: common_fields.piece_length,
-                    private: common_fields.private,
+                    private: common_fields.private.then_some(true),
                     source: common_fields.source,
                     kind: InfoHybrid { v1, v2 },
+                    extra: BTreeMap::new(),
                 },
                 piece_layers,
             },
@@ -896,18 +900,20 @@ mod utils {
                 info: Info {
                     name,
                     piece_length: common_fields.piece_length,
-                    private: common_fields.private,
+                    private: common_fields.private.then_some(true),
                     source: common_fields.source,
                     kind: v1,
+                    extra: BTreeMap::new(),
                 },
             },
             (None, Some(v2), Some(piece_layers)) => TorrentMeta::V2 {
                 info: Info {
                     name,
                     piece_length: common_fields.piece_length,
-                    private: common_fields.private,
+                    private: common_fields.private.then_some(true),
                     source: common_fields.source,
                     kind: v2,
+                    extra: BTreeMap::new(),
                 },
                 piece_layers,
             },

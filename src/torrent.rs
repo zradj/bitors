@@ -60,7 +60,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::{
-    bencode::Bencode,
+    bencode::{Bencode, cow_bytes_to_str},
     magnet::MagnetLink,
     torrent::builder::{TorrentBuilder, state::Empty},
 };
@@ -90,22 +90,38 @@ pub type FileTreeNodeBuf = FileTreeNode<'static>;
 /// Owned version of [`FileLeaf`]. Use [`FileLeaf::into_owned`] to obtain an instance.
 pub type FileLeafBuf = FileLeaf<'static>;
 
+/// A helper function that converts a map of unrecognized fields (e.g. [`Info::extra`])
+/// into its owned version.
+fn extra_into_owned(
+    extra: BTreeMap<Cow<'_, [u8]>, Bencode<'_>>,
+) -> BTreeMap<Cow<'static, [u8]>, Bencode<'static>> {
+    extra
+        .into_iter()
+        .map(|(k, v)| (Cow::Owned(k.into_owned()), v.into_owned()))
+        .collect()
+}
+
+/// A helper function that splits the value of the `pieces` field into 20-byte SHA-1 hashes.
+fn split_pieces(pieces: &[u8]) -> Result<&[[u8; 20]], Error> {
+    match pieces.as_chunks() {
+        (pieces, []) => Ok(pieces),
+        _ => Err(Error::InvalidPiecesLength),
+    }
+}
+
 /// A helper function that optionally extracts the v1 fields from an `info` dictionary.
 ///
 /// This function returns [`Some`] if all fields were present and [`None`] if none were.
 /// In the case of an inconsistent state (some fields were present and some were not), an
 /// [`enum@Error`] is returned.
 fn extract_info_v1_fields<'a>(
-    dict: &mut BTreeMap<&'a [u8], Bencode<'a>>,
+    dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
 ) -> Result<Option<InfoV1<'a>>, Error> {
     let pieces = match dict.opt(b"pieces") {
-        Some(b) => {
-            let pieces = b.as_bytes()?;
-            let (pieces, []) = pieces.as_chunks() else {
-                return Err(Error::InvalidPiecesLength);
-            };
-            Some(Cow::Borrowed(pieces))
-        }
+        Some(b) => Some(match b.into_bytes()? {
+            Cow::Borrowed(pieces) => Cow::Borrowed(split_pieces(pieces)?),
+            Cow::Owned(pieces) => Cow::Owned(split_pieces(&pieces)?.to_vec()),
+        }),
         None => None,
     };
 
@@ -129,8 +145,6 @@ fn extract_info_v1_fields<'a>(
                 .try_into()
                 .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-            let md5sum = md5sum.map(Cow::Borrowed);
-
             Some(FileMode::Single { length, md5sum })
         }
         (None, None, None) => None,
@@ -150,7 +164,7 @@ fn extract_info_v1_fields<'a>(
 /// In the case of an inconsistent state (some fields were present and some were not), an
 /// [`enum@Error`] is returned.
 fn extract_info_v2_fields<'a>(
-    dict: &mut BTreeMap<&'a [u8], Bencode<'a>>,
+    dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
 ) -> Result<Option<InfoV2<'a>>, Error> {
     let has_meta_version = match dict.opt(b"meta version") {
         Some(b) => {
@@ -195,15 +209,15 @@ trait DictExt<'a> {
 
     /// Optionally retrieve a [`Bencode`] element and convert it to [`str`].
     /// Returns an [`enum@Error`] if the element is not valid UTF-8.
-    fn opt_str(&mut self, key: &[u8]) -> Result<Option<&'a str>, Error>;
+    fn opt_str(&mut self, key: &[u8]) -> Result<Option<Cow<'a, str>>, Error>;
 
     /// Retrieve a required [`Bencode`] element from the map, converting it to [`str`].
     /// Returns an [`enum@Error`] if the element is not present in the map or if it is not
     /// valid UTF-8.
-    fn require_str(&mut self, key: &[u8]) -> Result<&'a str, Error>;
+    fn require_str(&mut self, key: &[u8]) -> Result<Cow<'a, str>, Error>;
 }
 
-impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
+impl<'a> DictExt<'a> for BTreeMap<Cow<'a, [u8]>, Bencode<'a>> {
     fn opt(&mut self, key: &[u8]) -> Option<Bencode<'a>> {
         self.remove(key)
     }
@@ -214,14 +228,14 @@ impl<'a> DictExt<'a> for BTreeMap<&'a [u8], Bencode<'a>> {
         ))
     }
 
-    fn opt_str(&mut self, key: &[u8]) -> Result<Option<&'a str>, Error> {
+    fn opt_str(&mut self, key: &[u8]) -> Result<Option<Cow<'a, str>>, Error> {
         self.opt(key)
-            .map(|b| b.as_str())
+            .map(Bencode::into_str)
             .transpose()
             .map_err(Error::from)
     }
 
-    fn require_str(&mut self, key: &[u8]) -> Result<&'a str, Error> {
+    fn require_str(&mut self, key: &[u8]) -> Result<Cow<'a, str>, Error> {
         self.opt_str(key)?.ok_or(Error::MissingField(
             String::from_utf8_lossy(key).into_owned(),
         ))
@@ -336,7 +350,10 @@ pub struct Info<'a, T: 'a + IntoOwned> {
     ///
     /// In private torrents, files are downloaded from an invite-only community.
     /// Private torrents do not use DHT or PEX.
-    pub private: bool,
+    ///
+    /// [`None`] means that the `private` field is absent, which is equivalent to `Some(false)`.
+    /// The two are kept apart because they produce different info hashes.
+    pub private: Option<bool>,
     /// A string in free form that is usually used to easily modify the info hash.
     ///
     /// It is also sometimes used by private torrents to trace the distribution of the torrent.
@@ -345,6 +362,13 @@ pub struct Info<'a, T: 'a + IntoOwned> {
     ///
     /// The type of this field should be either [`InfoV1`], [`InfoV2`], or [`InfoHybrid`].
     pub kind: T,
+    /// The fields of the `info` dictionary that are not recognized by this crate
+    /// (e.g. `name.utf-8` or `publisher`).
+    ///
+    /// They are preserved so that serializing the dictionary reproduces it exactly, which
+    /// is required for a correct info hash. A recognized field takes precedence over an
+    /// entry with the same key in this map.
+    pub extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
 }
 
 /// A helper enum that represents a parsed `info` dictionary.
@@ -434,10 +458,10 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
 
                 for (k, v) in b.into_dict()? {
                     let key = k
+                        .as_ref()
                         .try_into()
                         .map_err(|_| Error::IllegalFieldValue("piece layers (key)"))?;
-                    let value = v.as_bytes()?;
-                    piece_layers.insert(key, Cow::Borrowed(value));
+                    piece_layers.insert(key, v.into_bytes()?);
                 }
 
                 Some(PieceLayers(piece_layers))
@@ -456,7 +480,10 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
             }
         };
 
-        let tracker = dict.opt_str(b"announce")?.map(Url::parse).transpose()?;
+        let tracker = dict
+            .opt_str(b"announce")?
+            .map(|s| Url::parse(&s))
+            .transpose()?;
 
         let tracker_tiers = dict
             .opt(b"announce-list")
@@ -500,11 +527,11 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
             })
             .transpose()?;
 
-        let comment = dict.opt_str(b"comment")?.map(Cow::Borrowed);
+        let comment = dict.opt_str(b"comment")?;
 
-        let created_by = dict.opt_str(b"created by")?.map(Cow::Borrowed);
+        let created_by = dict.opt_str(b"created by")?;
 
-        let encoding = dict.opt_str(b"encoding")?.map(Cow::Borrowed);
+        let encoding = dict.opt_str(b"encoding")?;
 
         let res = Self {
             tracker_tiers,
@@ -539,7 +566,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
     fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
         let mut dict = bencode.into_dict()?;
 
-        let name = Cow::Borrowed(dict.require_str(b"name")?);
+        let name = dict.require_str(b"name")?;
         let piece_length = dict
             .require(b"piece length")?
             .as_int()?
@@ -550,16 +577,19 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
 
         let private = match dict.opt(b"private") {
             Some(b) => match b.as_int()? {
-                0 => false,
-                1 => true,
+                0 => Some(false),
+                1 => Some(true),
                 _ => return Err(Error::IllegalFieldValue("private")),
             },
-            None => false,
+            None => None,
         };
-        let source = dict.opt_str(b"source")?.map(Cow::Borrowed);
+        let source = dict.opt_str(b"source")?;
 
         let v1 = extract_info_v1_fields(&mut dict)?;
         let v2 = extract_info_v2_fields(&mut dict)?;
+
+        // All recognized fields have been removed by now
+        let extra = dict;
 
         match (v1, v2) {
             (Some(v1), Some(v2)) => {
@@ -573,6 +603,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
                     private,
                     source,
                     kind: InfoHybrid { v1, v2 },
+                    extra,
                 }))
             }
             (Some(v1), None) => Ok(ParsedInfo::V1(Info {
@@ -581,6 +612,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
                 private,
                 source,
                 kind: v1,
+                extra,
             })),
             (None, Some(v2)) => {
                 if !piece_length.is_power_of_two() || piece_length.get() < 16 * 1024 {
@@ -593,6 +625,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
                     private,
                     source,
                     kind: v2,
+                    extra,
                 }))
             }
             (None, None) => Err(Error::UnrecognizedFormat),
@@ -646,6 +679,7 @@ impl<T: IntoOwned> IntoOwned for Info<'_, T> {
             private: self.private,
             source: self.source.map(|c| Cow::Owned(c.into_owned())),
             kind: self.kind.into_owned(),
+            extra: extra_into_owned(self.extra),
         }
     }
 }
@@ -886,21 +920,26 @@ impl Torrent<'_> {
     /// Checks whether the torrent is private.
     #[must_use]
     pub fn private(&self) -> bool {
-        match &self.meta {
+        let private_opt = match &self.meta {
             TorrentMeta::V1 { info } => info.private,
             TorrentMeta::V2 { info, .. } => info.private,
             TorrentMeta::Hybrid { info, .. } => info.private,
-        }
+        };
+
+        private_opt.unwrap_or(false)
     }
 
     /// Changes this torrent's `private` field.
     ///
+    /// The field is always written out afterwards, as `1` or `0`. To remove it instead,
+    /// set [`Info::private`] to [`None`].
+    ///
     /// Note that this **will** change the info hash.
     pub fn set_private(&mut self, private: bool) {
         match &mut self.meta {
-            TorrentMeta::V1 { info } => info.private = private,
-            TorrentMeta::V2 { info, .. } => info.private = private,
-            TorrentMeta::Hybrid { info, .. } => info.private = private,
+            TorrentMeta::V1 { info } => info.private = Some(private),
+            TorrentMeta::V2 { info, .. } => info.private = Some(private),
+            TorrentMeta::Hybrid { info, .. } => info.private = Some(private),
         }
     }
 
@@ -1103,6 +1142,13 @@ pub struct FileInfo<'a> {
     pub md5sum: Option<Cow<'a, str>>,
     /// The file's path. Represented as a vector of path components.
     pub path: Vec<Cow<'a, str>>,
+    /// The fields of this dictionary that are not recognized by this crate
+    /// (e.g. `path.utf-8`).
+    ///
+    /// They are preserved so that the `info` dictionary can be reproduced exactly, which
+    /// is required for a correct info hash. A recognized field takes precedence over an
+    /// entry with the same key in this map.
+    pub extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
 }
 
 /// A `file tree` field representation.
@@ -1140,6 +1186,13 @@ pub struct FileLeaf<'a> {
     /// field. See [BEP 52](https://www.bittorrent.org/beps/bep_0052.html#:~:text=pieces%20root,-For)
     /// for a thorough explanation on how its value is computed.
     pub pieces_root: Option<Cow<'a, [u8; 32]>>,
+    /// The fields of this dictionary that are not recognized by this crate
+    /// (e.g. `mtime`).
+    ///
+    /// They are preserved so that the `info` dictionary can be reproduced exactly, which
+    /// is required for a correct info hash. A recognized field takes precedence over an
+    /// entry with the same key in this map.
+    pub extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
 }
 
 impl<'a> TryFrom<Bencode<'a>> for FileInfoAttr {
@@ -1189,13 +1242,13 @@ impl<'a> TryFrom<Bencode<'a>> for FileInfo<'a> {
             .try_into()
             .map_err(|_| Error::IllegalFieldValue("length"))?;
 
-        let md5sum = dict.opt_str(b"md5sum")?.map(Cow::Borrowed);
+        let md5sum = dict.opt_str(b"md5sum")?;
 
         let path = dict
             .require(b"path")?
-            .as_list()?
-            .iter()
-            .map(|b| b.as_str().map(Cow::Borrowed))
+            .into_list()?
+            .into_iter()
+            .map(Bencode::into_str)
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
@@ -1203,6 +1256,8 @@ impl<'a> TryFrom<Bencode<'a>> for FileInfo<'a> {
             length,
             md5sum,
             path,
+            // All recognized fields have been removed by now
+            extra: dict,
         })
     }
 }
@@ -1215,22 +1270,28 @@ impl<'a> TryFrom<Bencode<'a>> for FileTree<'a> {
     /// # Errors
     ///
     /// Returns an [`enum@Error`] if the [`Bencode`] element was not a dictionary,
-    /// a path component was not valid UTF-8, or if a leaf could not be converted (see
-    /// [`FileLeaf::try_from`] for more details).
+    /// a path component was empty or not valid UTF-8, a file node contained anything
+    /// besides its leaf, or if a leaf could not be converted (see [`FileLeaf::try_from`]
+    /// for more details).
     fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
         let dict = bencode.into_dict()?;
         let mut res = BTreeMap::new();
 
         for (key, value) in dict {
-            let key = std::str::from_utf8(key)?;
+            let key = cow_bytes_to_str(key)?;
+            if key.is_empty() {
+                return Err(Error::InvalidFileTree);
+            }
 
-            let node = if key.is_empty() {
-                FileTreeNode::File(FileLeaf::try_from(value)?)
-            } else {
-                FileTreeNode::Directory(Self::try_from(value)?)
+            // A file is a node whose only key is an empty string: `<name>: {"": <leaf>}`
+            let mut node_dict = value.into_dict()?;
+            let node = match node_dict.opt(b"") {
+                Some(leaf) if node_dict.is_empty() => FileTreeNode::File(FileLeaf::try_from(leaf)?),
+                Some(_) => return Err(Error::InvalidFileTree),
+                None => FileTreeNode::Directory(Self::try_from(Bencode::Dict(node_dict))?),
             };
 
-            res.insert(Cow::Borrowed(key), node);
+            res.insert(key, node);
         }
 
         Ok(Self(res))
@@ -1257,25 +1318,26 @@ impl<'a> TryFrom<Bencode<'a>> for FileLeaf<'a> {
             .as_int()?
             .try_into()
             .map_err(|_| Error::IllegalFieldValue("length"))?;
-        let pieces_root = dict.get(b"pieces root".as_slice());
+        let pieces_root = dict.opt(b"pieces root");
 
-        match (length, pieces_root) {
-            (0, None) => Ok(Self {
-                length: 0,
-                pieces_root: None,
-            }),
+        let pieces_root = match (length, pieces_root) {
+            (0, None) => None,
             (1.., Some(b)) => {
-                let pieces_root = b
-                    .as_bytes()?
-                    .try_into()
-                    .map_err(|_| Error::IllegalFieldValue("pieces root"))?;
-                Ok(Self {
-                    length,
-                    pieces_root: Some(Cow::Borrowed(pieces_root)),
+                let illegal = |_| Error::IllegalFieldValue("pieces root");
+                Some(match b.into_bytes()? {
+                    Cow::Borrowed(b) => Cow::Borrowed(b.try_into().map_err(illegal)?),
+                    Cow::Owned(b) => Cow::Owned(b.as_slice().try_into().map_err(illegal)?),
                 })
             }
-            _ => Err(Error::InvalidFileTree),
-        }
+            _ => return Err(Error::InvalidFileTree),
+        };
+
+        Ok(Self {
+            length,
+            pieces_root,
+            // All recognized fields have been removed by now
+            extra: dict,
+        })
     }
 }
 
@@ -1329,6 +1391,7 @@ impl IntoOwned for FileInfo<'_> {
                 .into_iter()
                 .map(|c| Cow::Owned(c.into_owned()))
                 .collect(),
+            extra: extra_into_owned(self.extra),
         }
     }
 }
@@ -1364,6 +1427,7 @@ impl IntoOwned for FileLeaf<'_> {
         FileLeafBuf {
             length: self.length,
             pieces_root: self.pieces_root.map(|c| Cow::Owned(c.into_owned())),
+            extra: extra_into_owned(self.extra),
         }
     }
 }
@@ -1566,4 +1630,179 @@ pub enum Error {
     /// The format of the torrent could not be recognized.
     #[error("Unrecognized torrent format")]
     UnrecognizedFormat,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_torrent;
+
+    /// Builds a [`Bencode::Dict`] from a list of key-value pairs.
+    fn dict(entries: Vec<(&'static str, Bencode<'static>)>) -> Bencode<'static> {
+        Bencode::Dict(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.as_bytes().into(), v))
+                .collect(),
+        )
+    }
+
+    /// Wraps an encoded `info` dictionary into an encoded torrent.
+    fn torrent_bytes(info: &Bencode<'_>, piece_layers: Option<Bencode<'static>>) -> Vec<u8> {
+        let mut torrent = vec![("info", info.clone().into_owned())];
+        if let Some(piece_layers) = piece_layers {
+            torrent.push(("piece layers", piece_layers));
+        }
+        dict(torrent).encode()
+    }
+
+    fn v1_info() -> Bencode<'static> {
+        dict(vec![
+            (
+                "files",
+                Bencode::List(vec![
+                    dict(vec![
+                        ("length", 1.into()),
+                        ("path", Bencode::List(vec!["a".into()])),
+                        ("path.utf-8", Bencode::List(vec!["a".into()])),
+                    ]),
+                    dict(vec![
+                        ("ed2k", vec![0xab; 16].into()),
+                        ("length", 2.into()),
+                        ("path", Bencode::List(vec!["b".into()])),
+                    ]),
+                ]),
+            ),
+            ("name", "test".into()),
+            ("name.utf-8", "test".into()),
+            ("piece length", 16384.into()),
+            ("pieces", vec![0x11; 20].into()),
+            ("private", 0.into()),
+            ("z", 1.into()),
+        ])
+    }
+
+    fn v2_info() -> Bencode<'static> {
+        dict(vec![
+            (
+                "file tree",
+                dict(vec![(
+                    "dir",
+                    dict(vec![(
+                        "a",
+                        dict(vec![(
+                            "",
+                            dict(vec![
+                                ("length", 1.into()),
+                                ("mtime", 1_700_000_000.into()),
+                                ("pieces root", vec![0x22; 32].into()),
+                            ]),
+                        )]),
+                    )]),
+                )]),
+            ),
+            ("meta version", 2.into()),
+            ("name", "test".into()),
+            ("piece length", 16384.into()),
+            ("z", dict(vec![("nested", Bencode::List(vec![1.into()]))])),
+        ])
+    }
+
+    #[test]
+    fn test_v1_info_hash_preserves_unknown_fields() {
+        let info = v1_info();
+        let info_bytes = info.encode();
+        let data = torrent_bytes(&info, None);
+        let torrent = parse_torrent(&data).unwrap();
+
+        let TorrentMeta::V1 { info: parsed } = &torrent.meta else {
+            panic!("expected a v1 torrent");
+        };
+        assert_eq!(parsed.private, Some(false));
+        assert!(!torrent.private());
+        assert_eq!(parsed.extra.len(), 2);
+        let FileMode::Multi { files } = &parsed.kind.file_mode else {
+            panic!("expected multiple files");
+        };
+        assert!(files[0].extra.contains_key(b"path.utf-8".as_slice()));
+        assert!(files[1].extra.contains_key(b"ed2k".as_slice()));
+
+        assert_eq!(parsed.to_bencode().encode(), info_bytes);
+        assert_eq!(
+            torrent.info_hash_v1().unwrap(),
+            <[u8; 20]>::from(Sha1::digest(&info_bytes))
+        );
+    }
+
+    #[test]
+    fn test_v2_info_hash_preserves_unknown_fields() {
+        let info = v2_info();
+        let info_bytes = info.encode();
+        let data = torrent_bytes(&info, Some(dict(vec![])));
+        let torrent = parse_torrent(&data).unwrap();
+
+        let TorrentMeta::V2 { info: parsed, .. } = &torrent.meta else {
+            panic!("expected a v2 torrent");
+        };
+        assert_eq!(parsed.private, None);
+
+        assert_eq!(parsed.to_bencode().encode(), info_bytes);
+        assert_eq!(
+            torrent.info_hash_v2().unwrap(),
+            <[u8; 32]>::from(Sha256::digest(&info_bytes))
+        );
+    }
+
+    #[test]
+    fn test_built_torrent_round_trip() {
+        let dir = std::env::temp_dir().join(format!("bitors-round-trip-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a"), vec![1u8; 40_000]).unwrap();
+        std::fs::write(dir.join("sub").join("b"), vec![2u8; 70_000]).unwrap();
+
+        let built = Torrent::builder()
+            .add_path(&dir)
+            .private(true)
+            .build_hybrid();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let built = built.unwrap();
+
+        let data = built.to_bencode().encode();
+        let parsed = parse_torrent(&data).unwrap();
+
+        assert_eq!(parsed.info_hash_v1(), built.info_hash_v1());
+        assert_eq!(parsed.info_hash_v2(), built.info_hash_v2());
+        assert_eq!(parsed.to_bencode().encode(), data);
+    }
+
+    #[test]
+    fn test_owned_torrent_keeps_info_hash() {
+        let data = torrent_bytes(&v1_info(), None);
+        let torrent = parse_torrent(&data).unwrap();
+        let hash = torrent.info_hash_v1();
+
+        let owned = torrent.into_owned();
+        drop(data);
+
+        assert_eq!(owned.info_hash_v1(), hash);
+    }
+
+    #[test]
+    fn test_recognized_field_takes_precedence_over_extra() {
+        let data = torrent_bytes(&v1_info(), None);
+        let mut torrent = parse_torrent(&data).unwrap();
+
+        let TorrentMeta::V1 { info } = &mut torrent.meta else {
+            panic!("expected a v1 torrent");
+        };
+        info.extra.insert(b"name".into(), "other".into());
+
+        let encoded = info.to_bencode();
+        assert_eq!(
+            encoded.as_dict().unwrap()[b"name".as_slice()]
+                .as_str()
+                .unwrap(),
+            "test"
+        );
+    }
 }

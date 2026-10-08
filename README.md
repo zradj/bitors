@@ -24,8 +24,8 @@ torrent into a [magnet link](https://en.wikipedia.org/wiki/Magnet_URI_scheme).
   crates, which use hardware acceleration where available.
 - **Info hashes and magnet links.** Compute the v1 (SHA-1) and v2 (SHA-256) info hashes and
   generate magnet links with [`MagnetLink`](crate::magnet::MagnetLink).
-- **Strict bencode.** The parser rejects leading zeros, negative zero, unsorted or duplicate
-  dictionary keys, non-string keys, and nesting deeper than a configurable limit.
+- **Strict bencode.** The parser rejects leading zeros, negative zero, plus signs, unsorted or
+  duplicate dictionary keys, non-string keys, and nesting deeper than a configurable limit.
 
 ## Quick start
 

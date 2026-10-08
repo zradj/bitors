@@ -4,7 +4,8 @@
 //! responses. This module provides:
 //!
 //! - [`Bencode`], a value type with one variant per bencode data type (integer, byte string,
-//!   list, and dictionary). It borrows its byte strings and dictionary keys from the input.
+//!   list, and dictionary). Its byte strings and dictionary keys are [`Cow`]s: values produced by
+//!   [`Parser`] borrow from the input, while values built by hand may own their data.
 //! - [`Parser`], a zero-copy parser that validates the input against the rules of
 //!   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding) and limits the nesting
 //!   depth.
@@ -33,6 +34,7 @@
 //! ```
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     io::{self, Write},
 };
@@ -79,30 +81,62 @@ fn encoded_bytes_len(byte_len: usize) -> usize {
     len_str_len + byte_len + 1
 }
 
+/// A helper function that writes a byte string to `writer` in its encoded form (`<len>:<bytes>`).
+fn write_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
+    write!(writer, "{}:", bytes.len())?;
+    writer.write_all(bytes)
+}
+
+/// A helper function that converts a byte string to a UTF-8 string without copying borrowed data.
+pub(crate) fn cow_bytes_to_str(bytes: Cow<'_, [u8]>) -> Result<Cow<'_, str>, std::str::Utf8Error> {
+    match bytes {
+        Cow::Borrowed(b) => Ok(Cow::Borrowed(std::str::from_utf8(b)?)),
+        Cow::Owned(b) => String::from_utf8(b)
+            .map(Cow::Owned)
+            .map_err(|e| e.utf8_error()),
+    }
+}
+
+/// A helper function that inserts the fields not recognized by this crate into `dict`.
+///
+/// The values are reborrowed (see [`Bencode::reborrow`]), so no byte data is copied.
+fn insert_extra_fields<'a>(
+    dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
+    extra: &'a BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
+) {
+    for (k, v) in extra {
+        dict.insert(k.as_ref().into(), v.reborrow());
+    }
+}
+
 /// A helper function that inserts the common fields from [`Info`] into `dict`.
 ///
 /// The common fields are those that are (or can optionally be) present in a metainfo
 /// file regardless of the BitTorrent version: `name`, `piece length`, `private`, and `source`.
+/// The unrecognized fields from [`Info::extra`] are inserted as well.
 fn insert_info_common_fields<'a, T: IntoOwned>(
-    dict: &mut BTreeMap<&[u8], Bencode<'a>>,
+    dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
     info: &'a Info<'a, T>,
 ) {
-    dict.insert(b"name", Bencode::Bytes(info.name.as_bytes()));
+    // Inserted first so that the recognized fields take precedence.
+    insert_extra_fields(dict, &info.extra);
+
+    dict.insert(b"name".into(), Bencode::from(info.name.as_bytes()));
     // Lengths are `u64`; Bencode integers are `i64`. A file larger than
     // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
     // approaches that size.
     #[allow(clippy::cast_possible_wrap)]
     dict.insert(
-        b"piece length",
+        b"piece length".into(),
         Bencode::Int(info.piece_length.get() as i64),
     );
 
-    if info.private {
-        dict.insert(b"private", Bencode::Int(1));
+    if let Some(private) = info.private {
+        dict.insert(b"private".into(), Bencode::Int(i64::from(private)));
     }
 
     if let Some(source) = &info.source {
-        dict.insert(b"source", Bencode::Bytes(source.as_bytes()));
+        dict.insert(b"source".into(), Bencode::from(source.as_bytes()));
     }
 }
 
@@ -112,8 +146,11 @@ fn insert_info_common_fields<'a, T: IntoOwned>(
 ///
 /// - **[`FileMode::Single`]**: `length` and `md5sum` (if present).
 /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
-fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a InfoV1<'a>) {
-    dict.insert(b"pieces", Bencode::Bytes(info.pieces.as_flattened()));
+fn insert_info_v1_fields<'a>(
+    dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
+    info: &'a InfoV1<'a>,
+) {
+    dict.insert(b"pieces".into(), Bencode::from(info.pieces.as_flattened()));
 
     match &info.file_mode {
         FileMode::Single { length, md5sum } => {
@@ -121,15 +158,15 @@ fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a 
             // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
             // approaches that size.
             #[allow(clippy::cast_possible_wrap)]
-            dict.insert(b"length", Bencode::Int(*length as i64));
+            dict.insert(b"length".into(), Bencode::Int(*length as i64));
 
             if let Some(md5sum) = md5sum {
-                dict.insert(b"md5sum", Bencode::Bytes(md5sum.as_bytes()));
+                dict.insert(b"md5sum".into(), Bencode::from(md5sum.as_bytes()));
             }
         }
         FileMode::Multi { files } => {
             let files = files.iter().map(Bencode::from).collect();
-            dict.insert(b"files", Bencode::List(files));
+            dict.insert(b"files".into(), Bencode::List(files));
         }
     }
 }
@@ -140,12 +177,15 @@ fn insert_info_v1_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a 
 ///
 /// See the `From<&FileTree>` implementation on [`Bencode`] for more information on how
 /// [`file_tree`](InfoV2::file_tree) is serialized.
-fn insert_info_v2_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a InfoV2<'a>) {
+fn insert_info_v2_fields<'a>(
+    dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
+    info: &'a InfoV2<'a>,
+) {
     dict.insert(
-        b"meta version",
+        b"meta version".into(),
         Bencode::Int(i64::from(InfoV2::META_VERSION)),
     );
-    dict.insert(b"file tree", (&info.file_tree).into());
+    dict.insert(b"file tree".into(), (&info.file_tree).into());
 }
 
 /// A zero-copy [Bencode](https://en.wikipedia.org/wiki/Bencode) element representation.
@@ -162,12 +202,12 @@ fn insert_info_v2_fields<'a>(dict: &mut BTreeMap<&[u8], Bencode<'a>>, info: &'a 
 pub enum Bencode<'a> {
     /// A signed 64-bit integer.
     Int(i64),
-    /// A slice of bytes.
-    Bytes(&'a [u8]),
+    /// A byte string, either borrowed or owned.
+    Bytes(Cow<'a, [u8]>),
     /// A list of other bencoded items.
     List(Vec<Bencode<'a>>),
     /// A dictionary mapping byte keys to bencoded items.
-    Dict(BTreeMap<&'a [u8], Bencode<'a>>),
+    Dict(BTreeMap<Cow<'a, [u8]>, Bencode<'a>>),
 }
 
 impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
@@ -177,19 +217,19 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
     /// optional fields from [`Torrent`] if set. See the `From<&TorrentMeta>` implementation on
     /// [`Bencode`] for more information on how [`TorrentMeta`] is serialized.
     fn from(torrent: &'a Torrent) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         match &torrent.meta {
             TorrentMeta::V1 { info } => {
-                dict.insert(b"info", info.into());
+                dict.insert(b"info".into(), info.into());
             }
             TorrentMeta::V2 { info, piece_layers } => {
-                dict.insert(b"info", info.into());
-                dict.insert(b"piece layers", piece_layers.into());
+                dict.insert(b"info".into(), info.into());
+                dict.insert(b"piece layers".into(), piece_layers.into());
             }
             TorrentMeta::Hybrid { info, piece_layers } => {
-                dict.insert(b"info", info.into());
-                dict.insert(b"piece layers", piece_layers.into());
+                dict.insert(b"info".into(), info.into());
+                dict.insert(b"piece layers".into(), piece_layers.into());
             }
         }
 
@@ -197,7 +237,10 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
             && let Some(first_tier) = tracker_tiers.first()
             && let Some(first_tracker) = first_tier.first()
         {
-            dict.insert(b"announce", Self::Bytes(first_tracker.as_str().as_bytes()));
+            dict.insert(
+                b"announce".into(),
+                Self::from(first_tracker.as_str().as_bytes()),
+            );
         }
 
         if let Some(tracker_tiers) = &torrent.tracker_tiers {
@@ -206,41 +249,41 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
                 .map(|tier| {
                     let tier_trackers = tier
                         .iter()
-                        .map(|tracker| Self::Bytes(tracker.as_str().as_bytes()))
+                        .map(|tracker| Self::from(tracker.as_str().as_bytes()))
                         .collect();
                     Self::List(tier_trackers)
                 })
                 .collect();
 
-            dict.insert(b"announce-list", Self::List(tracker_tiers));
+            dict.insert(b"announce-list".into(), Self::List(tracker_tiers));
         }
 
         if let Some(web_seeds) = &torrent.web_seeds {
             let web_seeds = web_seeds
                 .iter()
-                .map(|seed| Self::Bytes(seed.as_str().as_bytes()))
+                .map(|seed| Self::from(seed.as_str().as_bytes()))
                 .collect();
 
-            dict.insert(b"url-list", Self::List(web_seeds));
+            dict.insert(b"url-list".into(), Self::List(web_seeds));
         }
 
         if let Some(creation_date) = torrent.creation_date {
             dict.insert(
-                b"creation date",
+                b"creation date".into(),
                 Self::Int(creation_date.try_into().unwrap_or(0)),
             );
         }
 
         if let Some(comment) = &torrent.comment {
-            dict.insert(b"comment", Self::Bytes(comment.as_bytes()));
+            dict.insert(b"comment".into(), Self::from(comment.as_bytes()));
         }
 
         if let Some(created_by) = &torrent.created_by {
-            dict.insert(b"created by", Self::Bytes(created_by.as_bytes()));
+            dict.insert(b"created by".into(), Self::from(created_by.as_bytes()));
         }
 
         if let Some(encoding) = &torrent.encoding {
-            dict.insert(b"encoding", Self::Bytes(encoding.as_bytes()));
+            dict.insert(b"encoding".into(), Self::from(encoding.as_bytes()));
         }
 
         Self::Dict(dict)
@@ -257,10 +300,10 @@ impl<'a> From<&'a PieceLayers<'a>> for Bencode<'a> {
     ///
     /// Not present in v1-only torrents.
     fn from(piece_layers: &'a PieceLayers<'a>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         for (k, v) in &piece_layers.0 {
-            dict.insert(k.as_ref(), Self::Bytes(v));
+            dict.insert(k.as_slice().into(), Self::from(v.as_ref()));
         }
 
         Self::Dict(dict)
@@ -280,7 +323,7 @@ impl<'a> From<&'a Info<'a, InfoV1<'a>>> for Bencode<'a> {
     /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
     ///   See the `From<&FileMode>` implementation on [`Bencode`] for more information.
     fn from(info: &'a Info<'a, InfoV1<'a>>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         insert_info_common_fields(&mut dict, info);
         insert_info_v1_fields(&mut dict, &info.kind);
@@ -301,7 +344,7 @@ impl<'a> From<&'a Info<'a, InfoV2<'a>>> for Bencode<'a> {
     /// See the `From<&FileTree>` implementation on [`Bencode`] for more information on the
     /// `file tree` field.
     fn from(info: &'a Info<'a, InfoV2<'a>>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         insert_info_common_fields(&mut dict, info);
         insert_info_v2_fields(&mut dict, &info.kind);
@@ -326,7 +369,7 @@ impl<'a> From<&'a Info<'a, InfoHybrid<'a>>> for Bencode<'a> {
     /// The v2-specific fields are `file tree` and `meta version` (always 2). See the `From<&FileTree>`
     /// implementation on [`Bencode`] for more information on the `file tree` field.
     fn from(info: &'a Info<'a, InfoHybrid<'a>>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         insert_info_common_fields(&mut dict, info);
         insert_info_v1_fields(&mut dict, &info.kind.v1);
@@ -347,27 +390,30 @@ impl<'a> From<&'a FileInfo<'a>> for Bencode<'a> {
     ///
     /// Not present in v2-only torrents.
     fn from(file_info: &'a FileInfo<'a>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
+
+        // Inserted first so that the recognized fields take precedence.
+        insert_extra_fields(&mut dict, &file_info.extra);
 
         if let Some(attr) = &file_info.attr {
-            dict.insert(b"attr", Self::Bytes(attr.as_bytes()));
+            dict.insert(b"attr".into(), Self::from(attr.as_bytes()));
         }
 
         // Lengths are `u64`; Bencode integers are `i64`. A file larger than
         // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
         // approaches that size.
         #[allow(clippy::cast_possible_wrap)]
-        dict.insert(b"length", Self::Int(file_info.length as i64));
+        dict.insert(b"length".into(), Self::Int(file_info.length as i64));
 
         let path: Vec<Self> = file_info
             .path
             .iter()
-            .map(|s| Self::Bytes(s.as_bytes()))
+            .map(|s| Self::from(s.as_bytes()))
             .collect();
-        dict.insert(b"path", Self::List(path));
+        dict.insert(b"path".into(), Self::List(path));
 
         if let Some(md5sum) = &file_info.md5sum {
-            dict.insert(b"md5sum", Self::Bytes(md5sum.as_bytes()));
+            dict.insert(b"md5sum".into(), Self::from(md5sum.as_bytes()));
         }
 
         Self::Dict(dict)
@@ -385,10 +431,10 @@ impl<'a> From<&'a FileTree<'a>> for Bencode<'a> {
     ///
     /// Not present in v1-only torrents.
     fn from(tree: &'a FileTree<'a>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         for (k, v) in &tree.0 {
-            dict.insert(k.as_bytes(), v.into());
+            dict.insert(k.as_bytes().into(), v.into());
         }
 
         Self::Dict(dict)
@@ -408,16 +454,16 @@ impl<'a> From<&'a FileTreeNode<'a>> for Bencode<'a> {
     ///
     /// Not present in v1-only torrents.
     fn from(node: &'a FileTreeNode<'a>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         match node {
             FileTreeNode::Directory(file_tree) => {
                 for (k, v) in &file_tree.0 {
-                    dict.insert(k.as_bytes(), v.into());
+                    dict.insert(k.as_bytes().into(), v.into());
                 }
             }
             FileTreeNode::File(file_leaf) => {
-                dict.insert(b"", file_leaf.into());
+                dict.insert(b"".into(), file_leaf.into());
             }
         }
 
@@ -433,19 +479,74 @@ impl<'a> From<&'a FileLeaf<'a>> for Bencode<'a> {
     ///
     /// Not present in v1-only torrents.
     fn from(leaf: &'a FileLeaf<'a>) -> Self {
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
+
+        // Inserted first so that the recognized fields take precedence.
+        insert_extra_fields(&mut dict, &leaf.extra);
 
         // Lengths are `u64`; Bencode integers are `i64`. A file larger than
         // i64::MAX (≈ 8 EiB) cannot be represented, but no real torrent
         // approaches that size.
         #[allow(clippy::cast_possible_wrap)]
-        dict.insert(b"length", Self::Int(leaf.length as i64));
+        dict.insert(b"length".into(), Self::Int(leaf.length as i64));
 
         if let Some(pieces_root) = &leaf.pieces_root {
-            dict.insert(b"pieces root", Self::Bytes(pieces_root.as_ref()));
+            dict.insert(b"pieces root".into(), Self::from(pieces_root.as_slice()));
         }
 
         Self::Dict(dict)
+    }
+}
+
+impl From<i64> for Bencode<'_> {
+    /// Creates a [`Bencode::Int`] element.
+    fn from(i: i64) -> Self {
+        Self::Int(i)
+    }
+}
+
+impl<'a> From<&'a [u8]> for Bencode<'a> {
+    /// Creates a [`Bencode::Bytes`] element that borrows `bytes`.
+    fn from(bytes: &'a [u8]) -> Self {
+        Self::Bytes(Cow::Borrowed(bytes))
+    }
+}
+
+impl From<Vec<u8>> for Bencode<'_> {
+    /// Creates a [`Bencode::Bytes`] element that owns `bytes`.
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bytes(Cow::Owned(bytes))
+    }
+}
+
+impl<'a> From<&'a str> for Bencode<'a> {
+    /// Creates a [`Bencode::Bytes`] element that borrows the bytes of `s`.
+    fn from(s: &'a str) -> Self {
+        Self::Bytes(Cow::Borrowed(s.as_bytes()))
+    }
+}
+
+impl From<String> for Bencode<'_> {
+    /// Creates a [`Bencode::Bytes`] element that owns the bytes of `s`.
+    fn from(s: String) -> Self {
+        Self::Bytes(Cow::Owned(s.into_bytes()))
+    }
+}
+
+impl IntoOwned for Bencode<'_> {
+    type Owned = Bencode<'static>;
+
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Self::Int(i) => Bencode::Int(i),
+            Self::Bytes(b) => Bencode::Bytes(Cow::Owned(b.into_owned())),
+            Self::List(l) => Bencode::List(l.into_iter().map(Self::into_owned).collect()),
+            Self::Dict(d) => Bencode::Dict(
+                d.into_iter()
+                    .map(|(k, v)| (Cow::Owned(k.into_owned()), v.into_owned()))
+                    .collect(),
+            ),
+        }
     }
 }
 
@@ -465,12 +566,12 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    /// Returns the byte slice referenced in this [`Bencode`] element.
+    /// Returns a reference to the byte slice stored in this [`Bencode`] element.
     ///
     /// # Errors
     ///
     /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Bytes`].
-    pub fn as_bytes(&self) -> Result<&'a [u8], Error> {
+    pub fn as_bytes(&self) -> Result<&[u8], Error> {
         match self {
             Self::Bytes(b) => Ok(b),
             _ => Err(Error::WrongType {
@@ -500,7 +601,7 @@ impl<'a> Bencode<'a> {
     /// # Errors
     ///
     /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Dict`].
-    pub fn as_dict(&self) -> Result<&BTreeMap<&[u8], Bencode<'a>>, Error> {
+    pub fn as_dict(&self) -> Result<&BTreeMap<Cow<'a, [u8]>, Bencode<'a>>, Error> {
         match self {
             Self::Dict(d) => Ok(d),
             _ => Err(Error::WrongType {
@@ -510,7 +611,7 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    /// Converts the bytes referenced in this [`Bencode`] element to a string slice and
+    /// Converts the bytes stored in this [`Bencode`] element to a string slice and
     /// returns it.
     ///
     /// # Errors
@@ -518,9 +619,41 @@ impl<'a> Bencode<'a> {
     /// - [`Error::WrongType`] if the underlying variant is not [`Bencode::Bytes`].
     /// - [`Error::InvalidUtf8`] if the bytes cannot be represented as a valid UTF-8 encoded
     ///   string.
-    pub fn as_str(&self) -> Result<&'a str, Error> {
+    pub fn as_str(&self) -> Result<&str, Error> {
         let bytes = self.as_bytes()?;
         Ok(std::str::from_utf8(bytes)?)
+    }
+
+    /// Consumes this [`Bencode`] element and returns the bytes stored in it.
+    ///
+    /// Unlike [`as_bytes`](Bencode::as_bytes), the result keeps the lifetime of the
+    /// data this element was parsed from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Bytes`].
+    pub fn into_bytes(self) -> Result<Cow<'a, [u8]>, Error> {
+        match self {
+            Self::Bytes(b) => Ok(b),
+            _ => Err(Error::WrongType {
+                expected: "bytes",
+                actual: self.variant_desc(),
+            }),
+        }
+    }
+
+    /// Consumes this [`Bencode`] element and converts the bytes stored in it to a string.
+    ///
+    /// Unlike [`as_str`](Bencode::as_str), the result keeps the lifetime of the
+    /// data this element was parsed from.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::WrongType`] if the underlying variant is not [`Bencode::Bytes`].
+    /// - [`Error::InvalidUtf8`] if the bytes cannot be represented as a valid UTF-8 encoded
+    ///   string.
+    pub fn into_str(self) -> Result<Cow<'a, str>, Error> {
+        Ok(cow_bytes_to_str(self.into_bytes()?)?)
     }
 
     /// Consumes this [`Bencode`] element and returns the list stored in it.
@@ -543,7 +676,7 @@ impl<'a> Bencode<'a> {
     /// # Errors
     ///
     /// Returns [`Error::WrongType`] if the underlying variant is not [`Bencode::Dict`].
-    pub fn into_dict(self) -> Result<BTreeMap<&'a [u8], Bencode<'a>>, Error> {
+    pub fn into_dict(self) -> Result<BTreeMap<Cow<'a, [u8]>, Bencode<'a>>, Error> {
         match self {
             Self::Dict(d) => Ok(d),
             _ => Err(Error::WrongType {
@@ -592,10 +725,7 @@ impl<'a> Bencode<'a> {
     pub fn encode_to_writer<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
             Self::Int(i) => write!(writer, "i{i}e")?,
-            Self::Bytes(bytes) => {
-                write!(writer, "{}:", bytes.len())?;
-                writer.write_all(bytes)?;
-            }
+            Self::Bytes(bytes) => write_bytes(writer, bytes)?,
             Self::List(list) => {
                 writer.write_all(b"l")?;
                 for item in list {
@@ -606,7 +736,7 @@ impl<'a> Bencode<'a> {
             Self::Dict(dict) => {
                 writer.write_all(b"d")?;
                 for (k, v) in dict {
-                    Self::Bytes(k).encode_to_writer(writer)?;
+                    write_bytes(writer, k)?;
                     v.encode_to_writer(writer)?;
                 }
                 writer.write_all(b"e")?;
@@ -628,6 +758,21 @@ impl<'a> Bencode<'a> {
                     .map(|(k, v)| encoded_bytes_len(k.len()) + v.encoded_len())
                     .sum::<usize>()
             }
+        }
+    }
+
+    /// Returns a copy of this [`Bencode`] element that borrows all of its byte strings
+    /// from `self` instead of copying them.
+    fn reborrow(&self) -> Bencode<'_> {
+        match self {
+            Self::Int(i) => Bencode::Int(*i),
+            Self::Bytes(b) => Bencode::from(b.as_ref()),
+            Self::List(l) => Bencode::List(l.iter().map(Self::reborrow).collect()),
+            Self::Dict(d) => Bencode::Dict(
+                d.iter()
+                    .map(|(k, v)| (Cow::Borrowed(k.as_ref()), v.reborrow()))
+                    .collect(),
+            ),
         }
     }
 
@@ -741,8 +886,8 @@ impl<'a> Parser<'a> {
     /// - [`Error::InvalidInteger`] if an integer could not be parsed by Rust.
     /// - [`Error::InvalidBencodeInteger`] if an integer violated the bencode format
     ///   (see [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding)). This happens
-    ///   when an integer has a leading zero (`i01e`) or if a negative zero was provided
-    ///   (`i-0e`).
+    ///   when an integer has a leading zero (`i01e`), a negative zero was provided
+    ///   (`i-0e`), or the integer had a plus sign (`i+1e`).
     /// - [`Error::NonStringKey`] if a dictionary contained a non-string key (i.e. a key that is not [`Bencode::Bytes`]).
     ///   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding) requires that all dictionary keys
     ///   be strings.
@@ -792,7 +937,7 @@ impl<'a> Parser<'a> {
             .ok_or(Error::UnexpectedEof)?;
         let s = std::str::from_utf8(&self.data[self.cursor..self.cursor + end])?;
 
-        if s.starts_with("-0") || (s.starts_with('0') && s.len() > 1) {
+        if s.starts_with("-0") || s.starts_with('+') || (s.starts_with('0') && s.len() > 1) {
             return Err(Error::InvalidBencodeInteger(s.to_string()));
         }
 
@@ -810,7 +955,7 @@ impl<'a> Parser<'a> {
             .ok_or(Error::UnexpectedEof)?;
         let len_str = std::str::from_utf8(&self.data[self.cursor..self.cursor + colon])?;
 
-        if len_str.starts_with('0') && len_str.len() > 1 {
+        if len_str.starts_with('+') || (len_str.starts_with('0') && len_str.len() > 1) {
             return Err(Error::InvalidBencodeInteger(len_str.to_string()));
         }
 
@@ -819,7 +964,7 @@ impl<'a> Parser<'a> {
         let bytes = self.peek_slice(len)?;
         self.cursor += len;
 
-        Ok(Bencode::Bytes(bytes))
+        Ok(Bencode::Bytes(Cow::Borrowed(bytes)))
     }
 
     /// Parses a list of other bencoded items at the current position in the data. Increases the
@@ -844,7 +989,7 @@ impl<'a> Parser<'a> {
         let mut last_key = None;
 
         while self.peek()? != b'e' {
-            let Bencode::Bytes(key) = self.parse_internal(depth + 1)? else {
+            let Bencode::Bytes(Cow::Borrowed(key)) = self.parse_internal(depth + 1)? else {
                 return Err(Error::NonStringKey);
             };
 
@@ -862,7 +1007,7 @@ impl<'a> Parser<'a> {
 
             let value = self.parse_internal(depth + 1)?;
 
-            dict.insert(key, value);
+            dict.insert(Cow::Borrowed(key), value);
         }
         self.cursor += 1;
 
@@ -880,8 +1025,8 @@ pub enum Error {
     #[error("Integer parsing error: {0}")]
     InvalidInteger(#[from] std::num::ParseIntError),
     /// The raw representation of an integer violated the bencode format described in
-    /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding). The integer either had
-    /// a leading zero (`i01e`) or was a negative zero (`i-0e`).
+    /// [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding). The integer had
+    /// a leading zero (`i01e`), was a negative zero (`i-0e`), or had a plus sign (`i+1e`).
     #[error("Invalid Bencode integer representation: {0}")]
     InvalidBencodeInteger(String),
     /// An unexpected byte was encountered at a certain position in the data during parsing.
@@ -940,6 +1085,11 @@ mod tests {
         // Negative zero is invalid
         assert!(matches!(
             Parser::new(b"i-0e").parse(),
+            Err(Error::InvalidBencodeInteger(_))
+        ));
+        // A plus sign is invalid
+        assert!(matches!(
+            Parser::new(b"i+5e").parse(),
             Err(Error::InvalidBencodeInteger(_))
         ));
         // Missing numbers
@@ -1048,6 +1198,29 @@ mod tests {
     fn test_depth_limit() {
         let mut parser = Parser::with_max_depth(b"lllleeee", 2);
         assert!(matches!(parser.parse(), Err(Error::DepthLimitExceeded)));
+    }
+
+    #[test]
+    fn test_into_owned() {
+        let data = b"d3:bar4:spam3:fooli42e3:bazee".to_vec();
+        let owned = Parser::new(&data).parse().unwrap().into_owned();
+        drop(data);
+
+        assert_eq!(owned.encode(), b"d3:bar4:spam3:fooli42e3:bazee");
+    }
+
+    #[test]
+    fn test_into_str() {
+        let borrowed = Parser::new(b"4:spam").parse().unwrap().into_str().unwrap();
+        assert!(matches!(borrowed, Cow::Borrowed("spam")));
+
+        let owned = Bencode::from(String::from("spam")).into_str().unwrap();
+        assert!(matches!(owned, Cow::Owned(ref s) if s == "spam"));
+
+        assert!(matches!(
+            Bencode::from(vec![0xff]).into_str(),
+            Err(Error::InvalidUtf8(_))
+        ));
     }
 
     #[test]
