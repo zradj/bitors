@@ -497,22 +497,30 @@ mod field_builders {
         piece_length: usize,
         single_file: bool,
     ) -> Result<(InfoV1Buf, InfoV2Buf, PieceLayersBuf), Error> {
-        let mut files_pad = Vec::with_capacity(files.len());
+        let mut files_pad = Vec::with_capacity(files.len().saturating_mul(2).saturating_sub(1));
         let mut v1_to_v2_ids = Vec::with_capacity(files.len());
-        for file in files {
-            v1_to_v2_ids.push(files_pad.len());
-            files_pad.push(file.clone());
 
-            let pad_len = file.length.next_multiple_of(piece_length as u64) - file.length;
-            if pad_len > 0 {
-                files_pad.push(FileEntry {
-                    disk_path: PathBuf::new(),
-                    meta_path: PathBuf::from(format!(".pad/{pad_len}")),
-                    length: pad_len,
-                    padding: true,
-                });
+        if let Some((last, rest)) = files.split_last() {
+            let pl = piece_length as u64;
+            for file in rest {
+                v1_to_v2_ids.push(files_pad.len());
+                files_pad.push(file.clone());
+
+                let rem = file.length % pl;
+                if rem != 0 {
+                    let pad_len = file.length - rem;
+                    files_pad.push(FileEntry {
+                        disk_path: PathBuf::new(),
+                        meta_path: Path::new(".pad").join(pad_len.to_string()),
+                        length: pad_len,
+                        padding: true,
+                    });
+                }
             }
+            v1_to_v2_ids.push(files_pad.len());
+            files_pad.push(last.clone());
         }
+
         let single_file = single_file && (files_pad.len() == files.len());
 
         let file_manager = FileManager::new(&files_pad);
