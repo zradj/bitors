@@ -42,5 +42,8 @@ use crate::error::Error;
 /// Returns an error if `data` is not valid bencode, or if the decoded
 /// structure does not represent a valid torrent metainfo file.
 pub fn parse_torrent(data: &[u8]) -> Result<Torrent<'_>, Error> {
-    Ok(Torrent::try_from(Parser::new(data).parse()?)?)
+    let mut parser = Parser::new(data);
+    let mut torrent = Torrent::try_from(parser.parse()?)?;
+    torrent.set_raw_info(parser.info_bytes());
+    Ok(torrent)
 }

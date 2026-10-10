@@ -899,6 +899,7 @@ mod utils {
                     source: common_fields.source,
                     kind: InfoHybrid { v1, v2 },
                     extra: BTreeMap::new(),
+                    raw: None,
                 },
                 piece_layers,
             },
@@ -910,6 +911,7 @@ mod utils {
                     source: common_fields.source,
                     kind: v1,
                     extra: BTreeMap::new(),
+                    raw: None,
                 },
             },
             (None, Some(v2), Some(piece_layers)) => TorrentMeta::V2 {
@@ -920,6 +922,7 @@ mod utils {
                     source: common_fields.source,
                     kind: v2,
                     extra: BTreeMap::new(),
+                    raw: None,
                 },
                 piece_layers,
             },

@@ -369,6 +369,9 @@ pub struct Info<'a, T: 'a + IntoOwned> {
     /// is required for a correct info hash. A recognized field takes precedence over an
     /// entry with the same key in this map.
     pub extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
+    /// The raw bytes of this `info` dictionary. This is used to correctly rehash the dictionary as the
+    /// crate can normalize some data while parsing, thereby changing the original hash.
+    pub(crate) raw: Option<Cow<'a, [u8]>>,
 }
 
 /// A helper enum that represents a parsed `info` dictionary.
@@ -417,6 +420,28 @@ pub struct InfoHybrid<'a> {
     pub v1: InfoV1<'a>,
     /// V2-specific fields.
     pub v2: InfoV2<'a>,
+}
+
+/// The version-specific part of an [`Info`] dictionary.
+///
+/// This trait is sealed: it is implemented only for [`InfoV1`], [`InfoV2`], and [`InfoHybrid`].
+pub trait InfoKind: sealed::Sealed + IntoOwned {}
+
+impl InfoKind for InfoV1<'_> {}
+impl InfoKind for InfoV2<'_> {}
+impl InfoKind for InfoHybrid<'_> {}
+
+/// Holds [`Sealed`](sealed::Sealed), which keeps [`InfoKind`] from being implemented outside
+/// this crate and keeps its methods out of the public API.
+pub(crate) mod sealed {
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    use crate::bencode::Bencode;
+
+    pub trait Sealed {
+        /// Inserts the version-specific fields into the bencoded `info` dictionary.
+        fn insert_fields<'a>(&'a self, dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>);
+    }
 }
 
 impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
@@ -623,6 +648,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
                     source,
                     kind: InfoHybrid { v1, v2 },
                     extra,
+                    raw: None,
                 }))
             }
             (Some(v1), None) => Ok(ParsedInfo::V1(Info {
@@ -632,6 +658,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
                 source,
                 kind: v1,
                 extra,
+                raw: None,
             })),
             (None, Some(v2)) => {
                 if !piece_length.is_power_of_two() || piece_length.get() < 16 * 1024 {
@@ -645,6 +672,7 @@ impl<'a> TryFrom<Bencode<'a>> for ParsedInfo<'a> {
                     source,
                     kind: v2,
                     extra,
+                    raw: None,
                 }))
             }
             (None, None) => Err(Error::UnrecognizedFormat),
@@ -699,6 +727,7 @@ impl<T: IntoOwned> IntoOwned for Info<'_, T> {
             source: self.source.map(|c| Cow::Owned(c.into_owned())),
             kind: self.kind.into_owned(),
             extra: extra_into_owned(self.extra),
+            raw: None,
         }
     }
 }
@@ -985,73 +1014,82 @@ impl Torrent<'_> {
     }
 }
 
-impl<T: IntoOwned> Info<'_, T> {
+impl<'a> Torrent<'a> {
+    /// Returns the exact bytes of the `info` dictionary this torrent was parsed from,
+    /// or [`None`] if the torrent was not parsed or the bytes were discarded.
+    #[must_use]
+    pub fn raw_info(&self) -> Option<&[u8]> {
+        match &self.meta {
+            TorrentMeta::V1 { info } => info.raw.as_deref(),
+            TorrentMeta::V2 { info, .. } => info.raw.as_deref(),
+            TorrentMeta::Hybrid { info, .. } => info.raw.as_deref(),
+        }
+    }
+
+    /// Stores the exact bytes of the `info` dictionary, which the info hash is then
+    /// computed from.
+    pub(crate) fn set_raw_info(&mut self, raw: Option<&'a [u8]>) {
+        match &mut self.meta {
+            TorrentMeta::V1 { info } => info.raw = raw.map(Cow::Borrowed),
+            TorrentMeta::V2 { info, .. } => info.raw = raw.map(Cow::Borrowed),
+            TorrentMeta::Hybrid { info, .. } => info.raw = raw.map(Cow::Borrowed),
+        }
+    }
+}
+
+impl<T: InfoKind> Info<'_, T> {
+    /// A convenience method that converts this [`Info`] to a [`Bencode`] element.
+    ///
+    /// This is equivalent to [`Bencode::from`].
+    #[must_use]
+    pub fn to_bencode(&self) -> Bencode<'_> {
+        Bencode::from(self)
+    }
+
     /// An internal helper function that computes the info hash given the
-    /// hash function and the bencoded `info` dictionary.
-    fn info_hash_internal<D: Digest + Update>(
-        hash_func: D,
-        encoded_info: &Bencode<'_>,
-    ) -> Output<D> {
-        let mut hasher = digest_io::IoWrapper(hash_func);
-        let _ = encoded_info.encode_to_writer(&mut hasher);
-        hasher.0.finalize()
+    /// hash function.
+    fn info_hash_internal<D: Digest + Update>(&self, mut hash_func: D) -> Output<D> {
+        match &self.raw {
+            Some(raw) => {
+                Digest::update(&mut hash_func, raw);
+                hash_func.finalize()
+            }
+            None => {
+                let mut hasher = digest_io::IoWrapper(hash_func);
+                let _ = Bencode::from(self).encode_to_writer(&mut hasher);
+                hasher.0.finalize()
+            }
+        }
     }
 }
 
 impl Info<'_, InfoV1<'_>> {
-    /// A convenience method that converts this v1-only [`Info`] (`Info<'_, InfoV1<'_>>`)
-    /// to a [`Bencode`] element.
-    ///
-    /// This is equivalent to [`Bencode::from`].
-    #[must_use]
-    pub fn to_bencode(&self) -> Bencode<'_> {
-        Bencode::from(self)
-    }
-
     /// Computes the SHA-1 info hash of this `info` dictionary (BitTorrent v1).
     #[must_use]
     pub fn info_hash(&self) -> [u8; 20] {
-        Self::info_hash_internal(Sha1::new(), &self.to_bencode()).into()
+        self.info_hash_internal(Sha1::new()).into()
     }
 }
 
 impl Info<'_, InfoV2<'_>> {
-    /// A convenience method that converts this v2-only [`Info`] (`Info<'_, InfoV2<'_>>`)
-    /// to a [`Bencode`] element.
-    ///
-    /// This is equivalent to [`Bencode::from`].
-    #[must_use]
-    pub fn to_bencode(&self) -> Bencode<'_> {
-        Bencode::from(self)
-    }
-
     /// Computes the SHA-256 info hash of this `info` dictionary (BitTorrent v2).
     #[must_use]
     pub fn info_hash(&self) -> [u8; 32] {
-        Self::info_hash_internal(Sha256::new(), &self.to_bencode()).into()
+        self.info_hash_internal(Sha256::new()).into()
     }
 }
 
 impl Info<'_, InfoHybrid<'_>> {
-    /// A convenience method that converts this hybrid [`Info`] (`Info<'_, InfoHybrid<'_>>`)
-    /// to a [`Bencode`] element.
-    ///
-    /// This is equivalent to [`Bencode::from`].
-    #[must_use]
-    pub fn to_bencode(&self) -> Bencode<'_> {
-        Bencode::from(self)
-    }
-
     /// Computes the SHA-1 info hash of this `info` dictionary (BitTorrent v1).
     #[must_use]
     pub fn info_hash_v1(&self) -> [u8; 20] {
-        Self::info_hash_internal(Sha1::new(), &self.to_bencode()).into()
+        self.info_hash_internal(Sha1::new()).into()
     }
 
     /// Computes the SHA-256 info hash of this `info` dictionary (BitTorrent v2).
     #[must_use]
     pub fn info_hash_v2(&self) -> [u8; 32] {
-        Self::info_hash_internal(Sha256::new(), &self.to_bencode()).into()
+        self.info_hash_internal(Sha256::new()).into()
     }
 }
 

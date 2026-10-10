@@ -42,8 +42,8 @@ use std::{
 use thiserror::Error;
 
 use crate::torrent::{
-    FileInfo, FileLeaf, FileMode, FileTree, FileTreeNode, Info, InfoHybrid, InfoV1, InfoV2,
-    IntoOwned, PieceLayers, Torrent, TorrentMeta,
+    FileInfo, FileLeaf, FileMode, FileTree, FileTreeNode, Info, InfoHybrid, InfoKind, InfoV1,
+    InfoV2, IntoOwned, PieceLayers, Torrent, TorrentMeta, sealed::Sealed,
 };
 
 /// A helper function that calculates the length of a [`Bencode::Int`] variant in its encoded form.
@@ -114,7 +114,7 @@ fn insert_extra_fields<'a>(
 /// The common fields are those that are (or can optionally be) present in a metainfo
 /// file regardless of the BitTorrent version: `name`, `piece length`, `private`, and `source`.
 /// The unrecognized fields from [`Info::extra`] are inserted as well.
-fn insert_info_common_fields<'a, T: IntoOwned>(
+fn insert_info_common_fields<'a, T: InfoKind>(
     dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
     info: &'a Info<'a, T>,
 ) {
@@ -310,72 +310,48 @@ impl<'a> From<&'a PieceLayers<'a>> for Bencode<'a> {
     }
 }
 
-impl<'a> From<&'a Info<'a, InfoV1<'a>>> for Bencode<'a> {
-    /// Serializes a v1-only [`Info`] (`Info<'a, InfoV1<'a>>`) into its bencode representation.
+impl<'a, T: InfoKind> From<&'a Info<'a, T>> for Bencode<'a> {
+    /// Serializes an [`Info`] into its bencode representation.
     ///
-    /// The output is a [`Bencode::Dict`] that contains v1-specific fields and fields common for both
-    /// versions of BitTorrent.
+    /// The output is a [`Bencode::Dict`] that contains the fields common for both versions of
+    /// BitTorrent and the version-specific fields from [`Info::kind`].
     ///
     /// The common fields are `name`, `piece length`, `private`, and `source`.
     ///
-    /// The v1-specific fields are inserted based on the variant of [`InfoV1::file_mode`]:
-    /// - **[`FileMode::Single`]**: `length` and `md5sum` (if present).
-    /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
-    ///   See the `From<&FileMode>` implementation on [`Bencode`] for more information.
-    fn from(info: &'a Info<'a, InfoV1<'a>>) -> Self {
+    /// The version-specific fields are:
+    /// - **[`InfoV1`]**: `pieces`, plus either `length` and `md5sum` (if present) for
+    ///   [`FileMode::Single`], or the `files` list of serialized [`FileInfo`] dictionaries for
+    ///   [`FileMode::Multi`]. See the `From<&FileInfo>` implementation on [`Bencode`] for more
+    ///   information.
+    /// - **[`InfoV2`]**: `file tree` and `meta version` (always 2). See the `From<&FileTree>`
+    ///   implementation on [`Bencode`] for more information on the `file tree` field.
+    /// - **[`InfoHybrid`]**: all of the above.
+    fn from(info: &'a Info<'a, T>) -> Self {
         let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
 
         insert_info_common_fields(&mut dict, info);
-        insert_info_v1_fields(&mut dict, &info.kind);
+        info.kind.insert_fields(&mut dict);
 
         Self::Dict(dict)
     }
 }
 
-impl<'a> From<&'a Info<'a, InfoV2<'a>>> for Bencode<'a> {
-    /// Serializes a v2-only [`Info`] (`Info<'a, InfoV2<'a>>`) into its bencode representation.
-    ///
-    /// The output is a [`Bencode::Dict`] that contains v2-specific fields and fields common for both
-    /// versions of BitTorrent.
-    ///
-    /// The common fields are `name`, `piece length`, `private`, and `source`.
-    /// The v2-specific fields are `file tree` and `meta version` (always 2).
-    ///
-    /// See the `From<&FileTree>` implementation on [`Bencode`] for more information on the
-    /// `file tree` field.
-    fn from(info: &'a Info<'a, InfoV2<'a>>) -> Self {
-        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
-
-        insert_info_common_fields(&mut dict, info);
-        insert_info_v2_fields(&mut dict, &info.kind);
-
-        Self::Dict(dict)
+impl Sealed for InfoV1<'_> {
+    fn insert_fields<'a>(&'a self, dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>) {
+        insert_info_v1_fields(dict, self);
     }
 }
 
-impl<'a> From<&'a Info<'a, InfoHybrid<'a>>> for Bencode<'a> {
-    /// Serializes a hybrid [`Info`] (`Info<'a, InfoHybrid<'a>>`) into its bencode representation.
-    ///
-    /// The output is a [`Bencode::Dict`] that contains v1-specific fields, v2-specific fields,
-    /// and fields common for both versions of BitTorrent.
-    ///
-    /// The common fields are `name`, `piece length`, `private`, and `source`.
-    ///
-    /// The v1-specific fields are inserted based on the variant of [`InfoV1::file_mode`]:
-    /// - **[`FileMode::Single`]**: `length` and `md5sum` (if present).
-    /// - **[`FileMode::Multi`]**: `files` list that contains serialized [`FileInfo`] dictionaries.
-    ///   See the `From<&FileMode>` implementation on [`Bencode`] for more information.
-    ///
-    /// The v2-specific fields are `file tree` and `meta version` (always 2). See the `From<&FileTree>`
-    /// implementation on [`Bencode`] for more information on the `file tree` field.
-    fn from(info: &'a Info<'a, InfoHybrid<'a>>) -> Self {
-        let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
+impl Sealed for InfoV2<'_> {
+    fn insert_fields<'a>(&'a self, dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>) {
+        insert_info_v2_fields(dict, self);
+    }
+}
 
-        insert_info_common_fields(&mut dict, info);
-        insert_info_v1_fields(&mut dict, &info.kind.v1);
-        insert_info_v2_fields(&mut dict, &info.kind.v2);
-
-        Self::Dict(dict)
+impl Sealed for InfoHybrid<'_> {
+    fn insert_fields<'a>(&'a self, dict: &mut BTreeMap<Cow<'a, [u8]>, Bencode<'a>>) {
+        insert_info_v1_fields(dict, &self.v1);
+        insert_info_v2_fields(dict, &self.v2);
     }
 }
 
@@ -841,6 +817,8 @@ pub struct Parser<'a> {
     cursor: usize,
     /// The maximum nesting depth. Exceeding this depth will lead to [`Error::DepthLimitExceeded`].
     max_depth: usize,
+    /// The raw bytes of the `info` dictionary.
+    info_bytes: Option<&'a [u8]>,
 }
 
 impl<'a> Parser<'a> {
@@ -873,6 +851,7 @@ impl<'a> Parser<'a> {
             data,
             cursor: 0,
             max_depth,
+            info_bytes: None,
         }
     }
 
@@ -895,6 +874,12 @@ impl<'a> Parser<'a> {
     ///   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
         self.parse_internal(1)
+    }
+
+    /// Returns the raw bytes of the `info` dictionary if it was encountered during parsing, or `None` otherwise.
+    #[must_use]
+    pub fn info_bytes(&self) -> Option<&'a [u8]> {
+        self.info_bytes
     }
 
     /// Peeks at the current byte in the data. Returns [`Error::UnexpectedEof`] if there is none.
@@ -1005,7 +990,12 @@ impl<'a> Parser<'a> {
 
             last_key = Some(key);
 
+            let start = self.cursor;
             let value = self.parse_internal(depth + 1)?;
+
+            if depth == 1 && key == b"info" {
+                self.info_bytes = Some(&self.data[start..self.cursor]);
+            }
 
             dict.insert(Cow::Borrowed(key), value);
         }
