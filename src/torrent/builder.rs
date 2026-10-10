@@ -510,7 +510,7 @@ mod field_builders {
 
                 let rem = file.length % pl;
                 if rem != 0 {
-                    let pad_len = file.length - rem;
+                    let pad_len = pl - rem;
                     files_pad.push(FileEntry {
                         disk_path: PathBuf::new(),
                         meta_path: Path::new(".pad").join(pad_len.to_string()),
