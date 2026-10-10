@@ -257,20 +257,38 @@ impl<'a> DictExt<'a> for BTreeMap<Cow<'a, [u8]>, Bencode<'a>> {
 /// [`Parser`]: crate::bencode::Parser
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Torrent<'a> {
-    /// Tiers of trackers. See [`Torrent::tracker_tiers`].
-    pub(crate) tracker_tiers: Option<Vec<TrackerTier>>,
-    /// Web seeds. See [`Torrent::web_seeds`].
-    pub(crate) web_seeds: Option<Vec<Url>>,
-    /// Creation date. See [`Torrent::creation_date`].
-    pub(crate) creation_date: Option<u64>,
-    /// Free-form comment. See [`Torrent::comment`].
-    pub(crate) comment: Option<Cow<'a, str>>,
-    /// Creating software. See [`Torrent::created_by`].
-    pub(crate) created_by: Option<Cow<'a, str>>,
-    /// Encoding. See [`Torrent::encoding`].
-    pub(crate) encoding: Option<Cow<'a, str>>,
-    /// The `info` dictionary and `piece layers`. See [`Torrent::meta`].
-    pub(crate) meta: TorrentMeta<'a>,
+    /// A vector of tiers of trackers.
+    ///
+    /// A tracker is a specialized server that coordinates communication between peers. The
+    /// first tier acts as the primary choice for BitTorrent clients. The subsequent tiers
+    /// contain reserve trackers in case the primary trackers are unavailable.
+    /// Before proceeding to the next tier, all trackers within the current tier have to be tried.
+    ///
+    /// This field corresponds to the `announce-list` field in a raw torrent file. The `announce`
+    /// field is not represented directly; instead, during parsing, the `announce` field is ignored
+    /// if the `announce-list` is present. If it is absent, a single tier containing the value of
+    /// the `announce` field is created. During serialization, the first tracker of the first tier
+    /// is inserted into the `announce` field for compatibility reasons.
+    pub tracker_tiers: Option<Vec<TrackerTier>>,
+    /// A vector of web seeds.
+    ///
+    /// A web seed is an HTTP/HTTPS server that allows users to download file pieces directly
+    /// from it alongside the standard BitTorrent P2P swarm.
+    ///
+    /// This field corresponds to the `url-list` field in a raw torrent file.
+    pub web_seeds: Option<Vec<Url>>,
+    /// The creation date of the torrent in seconds since the Unix epoch.
+    pub creation_date: Option<u64>,
+    /// A comment in free form.
+    pub comment: Option<Cow<'a, str>>,
+    /// A string that typically indicates the software that created the torrent file.
+    pub created_by: Option<Cow<'a, str>>,
+    /// A string that indicates the torrent's encoding. It is almost always set to "UTF-8", and
+    /// this is the only encoding supported by this crate.
+    pub encoding: Option<Cow<'a, str>>,
+    /// Represents the torrent's required `info` dictionary, as well as the `piece layers`
+    /// field if the torrent is v2-only or hybrid. See [`TorrentMeta`] for more information.
+    pub meta: TorrentMeta<'a>,
 }
 
 /// Required torrent metainfo.
@@ -768,17 +786,6 @@ impl Torrent<'_> {
     }
 
     /// Returns a vector of the torrent's tracker tiers or an empty vector if none are present.
-    ///
-    /// A tracker is a specialized server that coordinates communication between peers. The
-    /// first tier acts as the primary choice for BitTorrent clients. The subsequent tiers
-    /// contain reserve trackers in case the primary trackers are unavailable.
-    /// Before proceeding to the next tier, all trackers within the current tier have to be tried.
-    ///
-    /// The tiers correspond to the `announce-list` field in a raw torrent file. The `announce`
-    /// field is not represented directly; instead, during parsing, the `announce` field is ignored
-    /// if the `announce-list` is present. If it is absent, a single tier containing the value of
-    /// the `announce` field is created. During serialization, the first tracker of the first tier
-    /// is inserted into the `announce` field for compatibility reasons.
     #[must_use]
     pub fn tracker_tiers(&self) -> Vec<&TrackerTier> {
         match &self.tracker_tiers {
@@ -983,100 +990,6 @@ impl Torrent<'_> {
 }
 
 impl<'a> Torrent<'a> {
-    /// Changes this torrent's tracker tiers (the `announce-list` field).
-    /// See [`Torrent::tracker_tiers`] for more information.
-    ///
-    /// [`None`] removes the field. This does not change the info hash.
-    pub fn set_tracker_tiers(&mut self, tracker_tiers: Option<Vec<TrackerTier>>) {
-        self.tracker_tiers = tracker_tiers;
-    }
-
-    /// Returns this torrent's web seeds, or [`None`] if the field is absent.
-    ///
-    /// A web seed is an HTTP/HTTPS server that allows users to download file pieces directly
-    /// from it alongside the standard BitTorrent P2P swarm.
-    ///
-    /// The web seeds correspond to the `url-list` field in a raw torrent file.
-    #[must_use]
-    pub fn web_seeds(&self) -> Option<&[Url]> {
-        self.web_seeds.as_deref()
-    }
-
-    /// Changes this torrent's web seeds (the `url-list` field).
-    ///
-    /// [`None`] removes the field. This does not change the info hash.
-    pub fn set_web_seeds(&mut self, web_seeds: Option<Vec<Url>>) {
-        self.web_seeds = web_seeds;
-    }
-
-    /// Returns this torrent's creation date in seconds since the Unix epoch.
-    #[must_use]
-    pub fn creation_date(&self) -> Option<u64> {
-        self.creation_date
-    }
-
-    /// Changes this torrent's creation date (in seconds since the Unix epoch).
-    ///
-    /// [`None`] removes the field. This does not change the info hash.
-    pub fn set_creation_date(&mut self, creation_date: Option<u64>) {
-        self.creation_date = creation_date;
-    }
-
-    /// Returns this torrent's free-form comment.
-    #[must_use]
-    pub fn comment(&self) -> Option<&str> {
-        self.comment.as_deref()
-    }
-
-    /// Changes this torrent's free-form comment.
-    ///
-    /// [`None`] removes the field. This does not change the info hash.
-    pub fn set_comment(&mut self, comment: Option<Cow<'a, str>>) {
-        self.comment = comment;
-    }
-
-    /// Returns the string that typically indicates the software that created the torrent file.
-    #[must_use]
-    pub fn created_by(&self) -> Option<&str> {
-        self.created_by.as_deref()
-    }
-
-    /// Changes the string that indicates the software that created the torrent file.
-    ///
-    /// [`None`] removes the field. This does not change the info hash.
-    pub fn set_created_by(&mut self, created_by: Option<Cow<'a, str>>) {
-        self.created_by = created_by;
-    }
-
-    /// Returns the string that indicates the torrent's encoding. It is almost always set to
-    /// "UTF-8", and this is the only encoding supported by this crate.
-    #[must_use]
-    pub fn encoding(&self) -> Option<&str> {
-        self.encoding.as_deref()
-    }
-
-    /// Changes this torrent's encoding.
-    ///
-    /// [`None`] removes the field. This does not change the info hash.
-    pub fn set_encoding(&mut self, encoding: Option<Cow<'a, str>>) {
-        self.encoding = encoding;
-    }
-
-    /// Returns this torrent's required `info` dictionary, as well as the `piece layers`
-    /// field if the torrent is v2-only or hybrid. See [`TorrentMeta`] for more information.
-    #[must_use]
-    pub fn meta(&self) -> &TorrentMeta<'a> {
-        &self.meta
-    }
-
-    /// Replaces this torrent's `info` dictionary and `piece layers` field.
-    ///
-    /// The info hash is computed from `meta` afterwards, so this **will** change it unless
-    /// `meta` contains the same `info` dictionary.
-    pub fn set_meta(&mut self, meta: TorrentMeta<'a>) {
-        self.meta = meta;
-    }
-
     /// Returns the exact bytes of the `info` dictionary this torrent was parsed from,
     /// or [`None`] if the torrent was not parsed or the bytes were discarded.
     #[must_use]
@@ -1669,7 +1582,7 @@ impl TrackerTier {
     /// # fn main() -> Result<(), Error> {
     /// # let data = [0u8; 10];
     /// let torrent = parse_torrent(&data)?; // Assume we already read the torrent into `data`
-    /// let mut first_tier = torrent.tracker_tiers()[0].clone();
+    /// let mut first_tier = torrent.tracker_tiers.unwrap()[0].clone();
     /// first_tier.shuffle();
     ///
     /// for tracker in &*first_tier {
@@ -2062,8 +1975,8 @@ mod tests {
         let mut torrent = parse_torrent(&data).unwrap();
         let hash = torrent.info_hash_v1();
 
-        torrent.set_comment(Some("comment".into()));
-        torrent.set_creation_date(Some(0));
+        torrent.comment = Some("comment".into());
+        torrent.creation_date = Some(0);
 
         assert!(torrent.raw_info().is_some());
         assert_eq!(torrent.info_hash_v1(), hash);
