@@ -247,9 +247,7 @@ impl<'a> DictExt<'a> for BTreeMap<Cow<'a, [u8]>, Bencode<'a>> {
 /// All of [`Torrent`]'s fields are optional except for [`Torrent::meta`], which represents
 /// the `info` dictionary and the `piece layers` field in v2-only and hybrid torrents.
 ///
-/// A torrent can be directly parsed from raw data using [`parse_torrent`]. Alternatively,
-/// you can parse it into [`Bencode`] using [`Parser`] and then call
-/// [`Torrent::try_from`] to obtain an instance of [`Torrent`].
+/// A torrent can be directly parsed from raw data using [`parse_torrent`].
 ///
 /// To build a torrent, it is recommended to use a [`TorrentBuilder`] that will
 /// perform all the necessary hashing in an efficient manner. An empty builder instance
@@ -259,38 +257,20 @@ impl<'a> DictExt<'a> for BTreeMap<Cow<'a, [u8]>, Bencode<'a>> {
 /// [`Parser`]: crate::bencode::Parser
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Torrent<'a> {
-    /// A vector of tiers of trackers.
-    ///
-    /// A tracker is a specialized server that coordinates communication between peers. The
-    /// first tier acts as the primary choice for BitTorrent clients. The subsequent tiers
-    /// contain reserve trackers in case the primary trackers are unavailable.
-    /// Before proceeding to the next tier, all trackers within the current tier have to be tried.
-    ///
-    /// This field corresponds to the `announce-list` field in a raw torrent file. The `announce`
-    /// field is not represented directly; instead, during parsing, the `announce` field is ignored
-    /// if the `announce-list` is present. If it is absent, a single tier containing the value of
-    /// the `announce` field is created. During serialization, the first tracker of the first tier
-    /// is inserted into the `announce` field for compatibility reasons.
-    pub tracker_tiers: Option<Vec<TrackerTier>>,
-    /// A vector of web seeds.
-    ///
-    /// A web seed is an HTTP/HTTPS server that allows users to download file pieces directly
-    /// from it alongside the standard BitTorrent P2P swarm.
-    ///
-    /// This field corresponds to the `url-list` field in a raw torrent file.
-    pub web_seeds: Option<Vec<Url>>,
-    /// The creation date of the torrent in seconds since the Unix epoch.
-    pub creation_date: Option<u64>,
-    /// A comment in free form.
-    pub comment: Option<Cow<'a, str>>,
-    /// A string that typically indicates the software that created the torrent file.
-    pub created_by: Option<Cow<'a, str>>,
-    /// A string that indicates the torrent's encoding. It is almost always set to "UTF-8", and
-    /// this is the only encoding supported by this crate.
-    pub encoding: Option<Cow<'a, str>>,
-    /// Represents the torrent's required `info` dictionary, as well as the `piece layers`
-    /// field if the torrent is v2-only or hybrid. See [`TorrentMeta`] for more information.
-    pub meta: TorrentMeta<'a>,
+    /// Tiers of trackers. See [`Torrent::tracker_tiers`].
+    pub(crate) tracker_tiers: Option<Vec<TrackerTier>>,
+    /// Web seeds. See [`Torrent::web_seeds`].
+    pub(crate) web_seeds: Option<Vec<Url>>,
+    /// Creation date. See [`Torrent::creation_date`].
+    pub(crate) creation_date: Option<u64>,
+    /// Free-form comment. See [`Torrent::comment`].
+    pub(crate) comment: Option<Cow<'a, str>>,
+    /// Creating software. See [`Torrent::created_by`].
+    pub(crate) created_by: Option<Cow<'a, str>>,
+    /// Encoding. See [`Torrent::encoding`].
+    pub(crate) encoding: Option<Cow<'a, str>>,
+    /// The `info` dictionary and `piece layers`. See [`Torrent::meta`].
+    pub(crate) meta: TorrentMeta<'a>,
 }
 
 /// Required torrent metainfo.
@@ -334,41 +314,18 @@ pub enum TorrentMeta<'a> {
 /// of BitTorrent.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Info<'a, T: 'a + IntoOwned> {
-    /// Torrent's name.
-    ///
-    /// In v1, it represents the name of the top directory if the torrent contains multiple files,
-    /// or the file name if the torrent consists of only one file. In v2, this field is purely
-    /// advisory.
-    pub name: Cow<'a, str>,
-    /// The length of a piece in bytes.
-    ///
-    /// Pieces are segments of torrent's data sent over the network.
-    ///
-    /// In v2, the length of a piece must be a power of two and at least 16 KiB (16384 bytes).
-    pub piece_length: NonZeroU64,
-    /// Indicates whether the torrent is private.
-    ///
-    /// In private torrents, files are downloaded from an invite-only community.
-    /// Private torrents do not use DHT or PEX.
-    ///
-    /// [`None`] means that the `private` field is absent, which is equivalent to `Some(false)`.
-    /// The two are kept apart because they produce different info hashes.
-    pub private: Option<bool>,
-    /// A string in free form that is usually used to easily modify the info hash.
-    ///
-    /// It is also sometimes used by private torrents to trace the distribution of the torrent.
-    pub source: Option<Cow<'a, str>>,
-    /// Contains version-specific fields.
-    ///
-    /// The type of this field should be either [`InfoV1`], [`InfoV2`], or [`InfoHybrid`].
-    pub kind: T,
-    /// The fields of the `info` dictionary that are not recognized by this crate
-    /// (e.g. `name.utf-8` or `publisher`).
-    ///
-    /// They are preserved so that serializing the dictionary reproduces it exactly, which
-    /// is required for a correct info hash. A recognized field takes precedence over an
-    /// entry with the same key in this map.
-    pub extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
+    /// Torrent's name. See [`Info::name`].
+    pub(crate) name: Cow<'a, str>,
+    /// The length of a piece in bytes. See [`Info::piece_length`].
+    pub(crate) piece_length: NonZeroU64,
+    /// Whether the torrent is private. See [`Info::private`].
+    pub(crate) private: Option<bool>,
+    /// The `source` field. See [`Info::source`].
+    pub(crate) source: Option<Cow<'a, str>>,
+    /// Version-specific fields. See [`Info::kind`].
+    pub(crate) kind: T,
+    /// Unrecognized fields. See [`Info::extra`].
+    pub(crate) extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
     /// The raw bytes of this `info` dictionary. This is used to correctly rehash the dictionary as the
     /// crate can normalize some data while parsing, thereby changing the original hash.
     pub(crate) raw: Option<Cow<'a, [u8]>>,
@@ -811,6 +768,17 @@ impl Torrent<'_> {
     }
 
     /// Returns a vector of the torrent's tracker tiers or an empty vector if none are present.
+    ///
+    /// A tracker is a specialized server that coordinates communication between peers. The
+    /// first tier acts as the primary choice for BitTorrent clients. The subsequent tiers
+    /// contain reserve trackers in case the primary trackers are unavailable.
+    /// Before proceeding to the next tier, all trackers within the current tier have to be tried.
+    ///
+    /// The tiers correspond to the `announce-list` field in a raw torrent file. The `announce`
+    /// field is not represented directly; instead, during parsing, the `announce` field is ignored
+    /// if the `announce-list` is present. If it is absent, a single tier containing the value of
+    /// the `announce` field is created. During serialization, the first tracker of the first tier
+    /// is inserted into the `announce` field for compatibility reasons.
     #[must_use]
     pub fn tracker_tiers(&self) -> Vec<&TrackerTier> {
         match &self.tracker_tiers {
@@ -943,11 +911,11 @@ impl Torrent<'_> {
     ///
     /// Note that this **will** change the info hash.
     pub fn set_name(&mut self, name: &str) {
-        let name = Cow::Owned(name.to_owned());
+        let name = name.to_owned();
         match &mut self.meta {
-            TorrentMeta::V1 { info } => info.name = name,
-            TorrentMeta::V2 { info, .. } => info.name = name,
-            TorrentMeta::Hybrid { info, .. } => info.name = name,
+            TorrentMeta::V1 { info } => info.set_name(name),
+            TorrentMeta::V2 { info, .. } => info.set_name(name),
+            TorrentMeta::Hybrid { info, .. } => info.set_name(name),
         }
     }
 
@@ -980,14 +948,14 @@ impl Torrent<'_> {
     /// Changes this torrent's `private` field.
     ///
     /// The field is always written out afterwards, as `1` or `0`. To remove it instead,
-    /// set [`Info::private`] to [`None`].
+    /// call [`Info::set_private`] with [`None`].
     ///
     /// Note that this **will** change the info hash.
     pub fn set_private(&mut self, private: bool) {
         match &mut self.meta {
-            TorrentMeta::V1 { info } => info.private = Some(private),
-            TorrentMeta::V2 { info, .. } => info.private = Some(private),
-            TorrentMeta::Hybrid { info, .. } => info.private = Some(private),
+            TorrentMeta::V1 { info } => info.set_private(Some(private)),
+            TorrentMeta::V2 { info, .. } => info.set_private(Some(private)),
+            TorrentMeta::Hybrid { info, .. } => info.set_private(Some(private)),
         }
     }
 
@@ -1007,14 +975,108 @@ impl Torrent<'_> {
     pub fn set_source(&mut self, source: &str) {
         let source = Some(Cow::Owned(source.to_owned()));
         match &mut self.meta {
-            TorrentMeta::V1 { info } => info.source = source,
-            TorrentMeta::V2 { info, .. } => info.source = source,
-            TorrentMeta::Hybrid { info, .. } => info.source = source,
+            TorrentMeta::V1 { info } => info.set_source(source),
+            TorrentMeta::V2 { info, .. } => info.set_source(source),
+            TorrentMeta::Hybrid { info, .. } => info.set_source(source),
         }
     }
 }
 
 impl<'a> Torrent<'a> {
+    /// Changes this torrent's tracker tiers (the `announce-list` field).
+    /// See [`Torrent::tracker_tiers`] for more information.
+    ///
+    /// [`None`] removes the field. This does not change the info hash.
+    pub fn set_tracker_tiers(&mut self, tracker_tiers: Option<Vec<TrackerTier>>) {
+        self.tracker_tiers = tracker_tiers;
+    }
+
+    /// Returns this torrent's web seeds, or [`None`] if the field is absent.
+    ///
+    /// A web seed is an HTTP/HTTPS server that allows users to download file pieces directly
+    /// from it alongside the standard BitTorrent P2P swarm.
+    ///
+    /// The web seeds correspond to the `url-list` field in a raw torrent file.
+    #[must_use]
+    pub fn web_seeds(&self) -> Option<&[Url]> {
+        self.web_seeds.as_deref()
+    }
+
+    /// Changes this torrent's web seeds (the `url-list` field).
+    ///
+    /// [`None`] removes the field. This does not change the info hash.
+    pub fn set_web_seeds(&mut self, web_seeds: Option<Vec<Url>>) {
+        self.web_seeds = web_seeds;
+    }
+
+    /// Returns this torrent's creation date in seconds since the Unix epoch.
+    #[must_use]
+    pub fn creation_date(&self) -> Option<u64> {
+        self.creation_date
+    }
+
+    /// Changes this torrent's creation date (in seconds since the Unix epoch).
+    ///
+    /// [`None`] removes the field. This does not change the info hash.
+    pub fn set_creation_date(&mut self, creation_date: Option<u64>) {
+        self.creation_date = creation_date;
+    }
+
+    /// Returns this torrent's free-form comment.
+    #[must_use]
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
+    /// Changes this torrent's free-form comment.
+    ///
+    /// [`None`] removes the field. This does not change the info hash.
+    pub fn set_comment(&mut self, comment: Option<Cow<'a, str>>) {
+        self.comment = comment;
+    }
+
+    /// Returns the string that typically indicates the software that created the torrent file.
+    #[must_use]
+    pub fn created_by(&self) -> Option<&str> {
+        self.created_by.as_deref()
+    }
+
+    /// Changes the string that indicates the software that created the torrent file.
+    ///
+    /// [`None`] removes the field. This does not change the info hash.
+    pub fn set_created_by(&mut self, created_by: Option<Cow<'a, str>>) {
+        self.created_by = created_by;
+    }
+
+    /// Returns the string that indicates the torrent's encoding. It is almost always set to
+    /// "UTF-8", and this is the only encoding supported by this crate.
+    #[must_use]
+    pub fn encoding(&self) -> Option<&str> {
+        self.encoding.as_deref()
+    }
+
+    /// Changes this torrent's encoding.
+    ///
+    /// [`None`] removes the field. This does not change the info hash.
+    pub fn set_encoding(&mut self, encoding: Option<Cow<'a, str>>) {
+        self.encoding = encoding;
+    }
+
+    /// Returns this torrent's required `info` dictionary, as well as the `piece layers`
+    /// field if the torrent is v2-only or hybrid. See [`TorrentMeta`] for more information.
+    #[must_use]
+    pub fn meta(&self) -> &TorrentMeta<'a> {
+        &self.meta
+    }
+
+    /// Replaces this torrent's `info` dictionary and `piece layers` field.
+    ///
+    /// The info hash is computed from `meta` afterwards, so this **will** change it unless
+    /// `meta` contains the same `info` dictionary.
+    pub fn set_meta(&mut self, meta: TorrentMeta<'a>) {
+        self.meta = meta;
+    }
+
     /// Returns the exact bytes of the `info` dictionary this torrent was parsed from,
     /// or [`None`] if the torrent was not parsed or the bytes were discarded.
     #[must_use]
@@ -1034,6 +1096,112 @@ impl<'a> Torrent<'a> {
             TorrentMeta::V2 { info, .. } => info.raw = raw.map(Cow::Borrowed),
             TorrentMeta::Hybrid { info, .. } => info.raw = raw.map(Cow::Borrowed),
         }
+    }
+}
+
+impl<'a, T: IntoOwned> Info<'a, T> {
+    /// Returns the torrent's name.
+    ///
+    /// In v1, it represents the name of the top directory if the torrent contains multiple files,
+    /// or the file name if the torrent consists of only one file. In v2, this field is purely
+    /// advisory.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Changes the torrent's name.
+    ///
+    /// Note that this **will** change the info hash.
+    pub fn set_name(&mut self, name: impl Into<Cow<'a, str>>) {
+        self.name = name.into();
+        self.raw = None;
+    }
+
+    /// Returns the length of a piece in bytes.
+    ///
+    /// Pieces are segments of torrent's data sent over the network.
+    ///
+    /// In v2, the length of a piece must be a power of two and at least 16 KiB (16384 bytes).
+    ///
+    /// Note that there is no setter for `piece_length`. This is because modifying
+    /// its value will invalidate all of the hashes in the torrent, thus making it
+    /// useless. Use [`TorrentBuilder`] to rehash the files.
+    #[must_use]
+    pub fn piece_length(&self) -> NonZeroU64 {
+        self.piece_length
+    }
+
+    /// Returns the value of the `private` field, which indicates whether the torrent is private.
+    ///
+    /// In private torrents, files are downloaded from an invite-only community.
+    /// Private torrents do not use DHT or PEX.
+    ///
+    /// [`None`] means that the field is absent, which is equivalent to `Some(false)`.
+    /// The two are kept apart because they produce different info hashes.
+    #[must_use]
+    pub fn private(&self) -> Option<bool> {
+        self.private
+    }
+
+    /// Changes the `private` field. [`None`] removes it.
+    ///
+    /// Note that this **will** change the info hash.
+    pub fn set_private(&mut self, private: Option<bool>) {
+        self.private = private;
+        self.raw = None;
+    }
+
+    /// Returns the value of the `source` field.
+    ///
+    /// The `source` field is a string in free form that is usually used to easily modify the
+    /// info hash. It is also sometimes used by private torrents to trace the distribution of
+    /// the torrent.
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// Changes the `source` field. [`None`] removes it.
+    ///
+    /// Note that this **will** change the info hash.
+    pub fn set_source(&mut self, source: Option<Cow<'a, str>>) {
+        self.source = source;
+        self.raw = None;
+    }
+
+    /// Returns the version-specific fields: [`InfoV1`], [`InfoV2`], or [`InfoHybrid`].
+    #[must_use]
+    pub fn kind(&self) -> &T {
+        &self.kind
+    }
+
+    /// Replaces the version-specific fields.
+    ///
+    /// Note that this **will** change the info hash.
+    pub fn set_kind(&mut self, kind: T) {
+        self.kind = kind;
+        self.raw = None;
+    }
+
+    /// Returns the fields of the `info` dictionary that are not recognized by this crate
+    /// (e.g. `name.utf-8` or `publisher`).
+    ///
+    /// They are preserved so that serializing the dictionary reproduces it exactly, which
+    /// is required for a correct info hash. A recognized field takes precedence over an
+    /// entry with the same key in this map.
+    #[must_use]
+    pub fn extra(&self) -> &BTreeMap<Cow<'a, [u8]>, Bencode<'a>> {
+        &self.extra
+    }
+
+    /// Replaces the fields of the `info` dictionary that are not recognized by this crate.
+    /// A recognized field takes precedence over an entry with the same key.
+    ///
+    /// Note that this **will** change the info hash.
+    pub fn set_extra(&mut self, extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>) {
+        self.extra = extra;
+        self.raw = None;
     }
 }
 
@@ -1501,7 +1669,7 @@ impl TrackerTier {
     /// # fn main() -> Result<(), Error> {
     /// # let data = [0u8; 10];
     /// let torrent = parse_torrent(&data)?; // Assume we already read the torrent into `data`
-    /// let mut first_tier = torrent.tracker_tiers.unwrap()[0].clone();
+    /// let mut first_tier = torrent.tracker_tiers()[0].clone();
     /// first_tier.shuffle();
     ///
     /// for tracker in &*first_tier {
@@ -1861,5 +2029,43 @@ mod tests {
                 .unwrap(),
             "test"
         );
+    }
+
+    #[test]
+    fn test_parsed_torrent_hashes_raw_info_bytes() {
+        let info_bytes = v1_info().encode();
+        let data = torrent_bytes(&v1_info(), None);
+        let torrent = parse_torrent(&data).unwrap();
+
+        assert_eq!(torrent.raw_info(), Some(info_bytes.as_slice()));
+        assert_eq!(
+            torrent.info_hash_v1(),
+            Some(Sha1::digest(&info_bytes).into())
+        );
+    }
+
+    #[test]
+    fn test_info_setters_discard_raw_info() {
+        let data = torrent_bytes(&v1_info(), None);
+        let mut torrent = parse_torrent(&data).unwrap();
+        let hash = torrent.info_hash_v1();
+
+        torrent.set_private(true);
+
+        assert_eq!(torrent.raw_info(), None);
+        assert_ne!(torrent.info_hash_v1(), hash);
+    }
+
+    #[test]
+    fn test_top_level_setters_keep_raw_info() {
+        let data = torrent_bytes(&v1_info(), None);
+        let mut torrent = parse_torrent(&data).unwrap();
+        let hash = torrent.info_hash_v1();
+
+        torrent.set_comment(Some("comment".into()));
+        torrent.set_creation_date(Some(0));
+
+        assert!(torrent.raw_info().is_some());
+        assert_eq!(torrent.info_hash_v1(), hash);
     }
 }
