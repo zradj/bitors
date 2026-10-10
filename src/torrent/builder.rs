@@ -276,7 +276,9 @@ mod hashing {
 
         while layer.len() > 1 {
             layer = layer
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| {
                     let mut hasher = Sha256::new();
                     hasher.update(chunk[0]);
