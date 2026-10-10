@@ -211,6 +211,11 @@ trait DictExt<'a> {
     /// Returns an [`enum@Error`] if the element is not valid UTF-8.
     fn opt_str(&mut self, key: &[u8]) -> Result<Option<Cow<'a, str>>, Error>;
 
+    /// Optionally retrieve a [`Bencode`] element and convert it to [`str`].
+    /// Returns [`None`] if the element is absent, is not a byte string, or is not
+    /// valid UTF-8. Only use this for fields that do not affect the info hash.
+    fn opt_str_lenient(&mut self, key: &[u8]) -> Option<Cow<'a, str>>;
+
     /// Retrieve a required [`Bencode`] element from the map, converting it to [`str`].
     /// Returns an [`enum@Error`] if the element is not present in the map or if it is not
     /// valid UTF-8.
@@ -233,6 +238,10 @@ impl<'a> DictExt<'a> for BTreeMap<Cow<'a, [u8]>, Bencode<'a>> {
             .map(Bencode::into_str)
             .transpose()
             .map_err(Error::from)
+    }
+
+    fn opt_str_lenient(&mut self, key: &[u8]) -> Option<Cow<'a, str>> {
+        self.opt(key)?.into_str().ok()
     }
 
     fn require_str(&mut self, key: &[u8]) -> Result<Cow<'a, str>, Error> {
@@ -430,6 +439,13 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
     /// The `announce` field is not represented directly; see [`Torrent::tracker_tiers`] for more
     /// information.
     ///
+    /// The optional top-level fields are parsed leniently, since they are not part of the `info`
+    /// dictionary and cannot affect the info hash. The `announce`, `creation date`, `comment`,
+    /// `created by`, and `encoding` fields are set to [`None`] if they have the wrong type or
+    /// invalid content (e.g. invalid UTF-8 or a negative creation date). Invalid URLs in
+    /// `announce-list` and `url-list` are skipped. Dropped fields are not written back when the
+    /// torrent is serialized.
+    ///
     /// # Errors
     ///
     /// Returns an [`enum@Error`] in the following cases:
@@ -443,9 +459,7 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
     ///   - The `meta version` field was not set to `2` in a v2 or hybrid torrent;
     ///   - Fields representing lengths of files contained negative values;
     /// - The `piece layers` field was absent in a v2 or hybrid torrent;
-    /// - Invalid values in some fields:
-    ///   - Negative creation date;
-    ///   - Malformed URLs;
+    /// - The `announce-list` or `url-list` field contained values other than byte strings;
     /// - File information mismatch between the v1 and v2 metainfo in a hybrid torrent.
     fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
         let mut dict = bencode.into_dict()?;
@@ -481,7 +495,9 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
         };
 
         // `None` if this field is absent or if the content cannot be parsed.
-        let tracker = dict.opt_str(b"announce")?.and_then(|s| Url::parse(&s).ok());
+        let tracker = dict
+            .opt_str_lenient(b"announce")
+            .and_then(|s| Url::parse(&s).ok());
 
         let tracker_tiers = match dict.opt(b"announce-list") {
             Some(b) => Some(
@@ -539,18 +555,13 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
 
         let creation_date = dict
             .opt(b"creation date")
-            .map(|b| -> Result<u64, Error> {
-                b.as_int()?
-                    .try_into()
-                    .map_err(|_| Error::IllegalFieldValue("creation date"))
-            })
-            .transpose()?;
+            .and_then(|b| b.as_int().ok()?.try_into().ok());
 
-        let comment = dict.opt_str(b"comment")?;
+        let comment = dict.opt_str_lenient(b"comment");
 
-        let created_by = dict.opt_str(b"created by")?;
+        let created_by = dict.opt_str_lenient(b"created by");
 
-        let encoding = dict.opt_str(b"encoding")?;
+        let encoding = dict.opt_str_lenient(b"encoding");
 
         let res = Self {
             tracker_tiers,
@@ -1130,16 +1141,13 @@ impl<T: InfoKind> Info<'_, T> {
     /// An internal helper function that computes the info hash given the
     /// hash function.
     fn info_hash_internal<D: Digest + Update>(&self, mut hash_func: D) -> Output<D> {
-        match &self.raw {
-            Some(raw) => {
-                Digest::update(&mut hash_func, raw);
-                hash_func.finalize()
-            }
-            None => {
-                let mut hasher = digest_io::IoWrapper(hash_func);
-                let _ = Bencode::from(self).encode_to_writer(&mut hasher);
-                hasher.0.finalize()
-            }
+        if let Some(raw) = &self.raw {
+            Digest::update(&mut hash_func, raw);
+            hash_func.finalize()
+        } else {
+            let mut hasher = digest_io::IoWrapper(hash_func);
+            let _ = Bencode::from(self).encode_to_writer(&mut hasher);
+            hasher.0.finalize()
         }
     }
 }
@@ -1967,6 +1975,33 @@ mod tests {
 
         assert_eq!(torrent.raw_info(), None);
         assert_ne!(torrent.info_hash_v1(), hash);
+    }
+
+    #[test]
+    fn test_invalid_optional_top_level_fields_are_dropped() {
+        let valid = torrent_bytes(&v1_info(), None);
+        let hash = parse_torrent(&valid).unwrap().info_hash_v1();
+
+        for (key, value) in [
+            ("announce", Bencode::from(vec![0xff])),
+            ("announce", 1.into()),
+            ("comment", vec![0xff].into()),
+            ("comment", 1.into()),
+            ("created by", vec![0xff].into()),
+            ("creation date", "yesterday".into()),
+            ("creation date", (-1).into()),
+            ("encoding", vec![0xff].into()),
+        ] {
+            let data = dict(vec![(key, value), ("info", v1_info())]).encode();
+            let torrent = parse_torrent(&data).unwrap();
+
+            assert_eq!(torrent.tracker_tiers, None, "{key}");
+            assert_eq!(torrent.creation_date, None, "{key}");
+            assert_eq!(torrent.comment, None, "{key}");
+            assert_eq!(torrent.created_by, None, "{key}");
+            assert_eq!(torrent.encoding, None, "{key}");
+            assert_eq!(torrent.info_hash_v1(), hash, "{key}");
+        }
     }
 
     #[test]
