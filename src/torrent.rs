@@ -22,9 +22,12 @@
 //!
 //! A [`Torrent`] is obtained in one of three ways:
 //!
-//! - [`parse_torrent`](crate::parse_torrent) parses raw data directly.
+//! - [`parse_torrent`](crate::parse_torrent) parses raw data directly, and
+//!   [`parse_torrent_prefix`](crate::parse_torrent_prefix) also allows data after the torrent.
 //! - [`Torrent::try_from`] converts a [`Bencode`] element that was parsed earlier with
-//!   [`Parser`](crate::bencode::Parser).
+//!   [`Parser`](crate::bencode::Parser). Since the original bytes of the `info` dictionary are
+//!   not available to it, the info hash is computed by re-encoding the parsed fields, which can
+//!   differ from the original for some valid torrents. Prefer the functions above.
 //! - [`Torrent::builder`] returns a [`TorrentBuilder`] that hashes files on disk (see the
 //!   [`builder`] module).
 //!
@@ -298,6 +301,14 @@ pub struct Torrent<'a> {
     /// Represents the torrent's required `info` dictionary, as well as the `piece layers`
     /// field if the torrent is v2-only or hybrid. See [`TorrentMeta`] for more information.
     pub meta: TorrentMeta<'a>,
+    /// Top-level fields that are not recognized by this crate (e.g. `nodes` from
+    /// [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) or `httpseeds` from
+    /// [BEP 17](https://www.bittorrent.org/beps/bep_0017.html)).
+    ///
+    /// They are preserved so that serializing a parsed torrent does not lose them. A recognized
+    /// field takes precedence over an entry with the same key in this map. Recognized fields that
+    /// were dropped during parsing because of invalid content are not stored here.
+    pub extra: BTreeMap<Cow<'a, [u8]>, Bencode<'a>>,
 }
 
 /// Required torrent metainfo.
@@ -436,6 +447,13 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
     /// The function extracts all of [`Torrent`]'s fields and constructs a [`TorrentMeta`].
     /// It also enforces that the files in the v1 and v2 fields match in the case of a hybrid torrent.
     ///
+    /// The resulting torrent does not have the original bytes of the `info` dictionary (see
+    /// [`Torrent::raw_info`]), so its info hash is computed by re-encoding the parsed fields.
+    /// Use [`parse_torrent`] or [`parse_torrent_prefix`] to keep them.
+    ///
+    /// [`parse_torrent`]: crate::parse_torrent
+    /// [`parse_torrent_prefix`]: crate::parse_torrent_prefix
+    ///
     /// The `announce` field is not represented directly; see [`Torrent::tracker_tiers`] for more
     /// information.
     ///
@@ -445,6 +463,8 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
     /// invalid content (e.g. invalid UTF-8 or a negative creation date). Invalid URLs in
     /// `announce-list` and `url-list` are skipped. Dropped fields are not written back when the
     /// torrent is serialized.
+    ///
+    /// Unrecognized top-level fields are stored in [`Torrent::extra`].
     ///
     /// # Errors
     ///
@@ -571,6 +591,7 @@ impl<'a> TryFrom<Bencode<'a>> for Torrent<'a> {
             created_by,
             encoding,
             meta,
+            extra: dict,
         };
 
         if res.hybrid_mismatch() {
@@ -678,6 +699,7 @@ impl IntoOwned for Torrent<'_> {
             created_by: self.created_by.map(|c| Cow::Owned(c.into_owned())),
             encoding: self.encoding.map(|c| Cow::Owned(c.into_owned())),
             meta: self.meta.into_owned(),
+            extra: extra_into_owned(self.extra),
         }
     }
 }
@@ -713,7 +735,7 @@ impl<T: IntoOwned> IntoOwned for Info<'_, T> {
             source: self.source.map(|c| Cow::Owned(c.into_owned())),
             kind: self.kind.into_owned(),
             extra: extra_into_owned(self.extra),
-            raw: None,
+            raw: self.raw.map(|c| Cow::Owned(c.into_owned())),
         }
     }
 }
@@ -1247,6 +1269,10 @@ pub struct FileInfoAttr {
     encoded: [u8; 4],
     /// The length of the encoded flags.
     len: usize,
+    /// The original bytes of a parsed `attr` field, if they differ from `encoded`
+    /// (e.g. `hx` instead of `xh`). Kept so that re-encoding reproduces the original field.
+    /// Any method that changes `flags` in place must reset this to `None`.
+    raw: Option<Vec<u8>>,
 }
 
 bitflags! {
@@ -1263,7 +1289,7 @@ bitflags! {
     ///
     /// See [BEP 47](https://www.bittorrent.org/beps/bep_0047.html) for more information on symlinks
     /// and padding files.
-    #[derive(Debug, PartialEq, Eq, Clone)]
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct FileInfoAttrFlags: u8 {
         /// The file is a symlink (`l`).
         const SYMLINK = 0b0001;
@@ -1354,7 +1380,8 @@ impl<'a> TryFrom<Bencode<'a>> for FileInfoAttr {
     fn try_from(bencode: Bencode<'a>) -> Result<Self, Self::Error> {
         let mut flags = FileInfoAttrFlags::empty();
 
-        for &c in bencode.as_bytes()? {
+        let raw_attrs = bencode.as_bytes()?;
+        for &c in raw_attrs {
             match c {
                 b'l' => flags.insert(FileInfoAttrFlags::SYMLINK),
                 b'x' => flags.insert(FileInfoAttrFlags::EXEC),
@@ -1364,7 +1391,11 @@ impl<'a> TryFrom<Bencode<'a>> for FileInfoAttr {
             }
         }
 
-        Ok(Self::new(flags))
+        let mut attr = Self::new(flags);
+        if raw_attrs != attr.as_bytes() {
+            attr.raw = Some(raw_attrs.to_vec());
+        }
+        Ok(attr)
     }
 }
 
@@ -1642,13 +1673,28 @@ impl FileInfoAttr {
             flags,
             encoded,
             len,
+            raw: None,
         }
     }
 
+    /// Returns the file's attributes as bit flags.
+    #[must_use]
+    pub fn flags(&self) -> FileInfoAttrFlags {
+        self.flags
+    }
+
     /// Returns the content of the `attr` field as bytes.
+    ///
+    /// For a parsed `attr` field, these are the original bytes, which may list the
+    /// attributes in a non-standard order or repeat them (e.g. `hx` or `xxh`).
+    /// Otherwise, the attributes are encoded in the order `l`, `x`, `h`, `p`.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.encoded[..self.len]
+        if let Some(raw) = self.raw.as_ref() {
+            raw
+        } else {
+            &self.encoded[..self.len]
+        }
     }
 }
 
@@ -1718,6 +1764,7 @@ impl FileTree<'_> {
 
 /// Errors that can occur when parsing a torrent.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The raw data was not valid bencode.
     #[error("Bencode parsing error: {0}")]
@@ -1921,16 +1968,61 @@ mod tests {
         assert_eq!(parsed.to_bencode().encode(), data);
     }
 
+    /// Returns [`v1_info`] with a non-canonical `attr` field (`hx` instead of `xh`) on the first file.
+    fn v1_info_with_attr() -> Bencode<'static> {
+        let mut info = v1_info().into_dict().unwrap();
+        let Some(Bencode::List(files)) = info.get_mut(b"files".as_slice()) else {
+            panic!("expected a files list");
+        };
+        let Bencode::Dict(file) = &mut files[0] else {
+            panic!("expected a file dictionary");
+        };
+        file.insert(b"attr".into(), "hx".into());
+        Bencode::Dict(info)
+    }
+
     #[test]
     fn test_owned_torrent_keeps_info_hash() {
-        let data = torrent_bytes(&v1_info(), None);
+        let info_bytes = v1_info_with_attr().encode();
+        let data = torrent_bytes(&v1_info_with_attr(), None);
         let torrent = parse_torrent(&data).unwrap();
-        let hash = torrent.info_hash_v1();
 
         let owned = torrent.into_owned();
         drop(data);
 
-        assert_eq!(owned.info_hash_v1(), hash);
+        assert_eq!(owned.info_hash_v1(), Some(Sha1::digest(&info_bytes).into()));
+    }
+
+    #[test]
+    fn test_reencoded_info_keeps_attr_bytes() {
+        let data = torrent_bytes(&v1_info_with_attr(), None);
+        let mut torrent = parse_torrent(&data).unwrap();
+        torrent.set_name("other");
+
+        let mut expected = v1_info_with_attr().into_dict().unwrap();
+        expected.insert(b"name".into(), "other".into());
+        let expected = Bencode::Dict(expected).encode();
+
+        assert_eq!(torrent.raw_info(), None);
+        assert_eq!(torrent.info_hash_v1(), Some(Sha1::digest(&expected).into()));
+    }
+
+    #[test]
+    fn test_attr_raw_bytes() {
+        let canonical = FileInfoAttr::try_from(Bencode::from("xh")).unwrap();
+        assert_eq!(
+            canonical,
+            FileInfoAttr::new(FileInfoAttrFlags::EXEC | FileInfoAttrFlags::HIDDEN)
+        );
+        assert_eq!(canonical.as_bytes(), b"xh");
+        assert_eq!(
+            canonical.flags(),
+            FileInfoAttrFlags::EXEC | FileInfoAttrFlags::HIDDEN
+        );
+
+        let reordered = FileInfoAttr::try_from(Bencode::from("hx")).unwrap();
+        assert_eq!(reordered.as_bytes(), b"hx");
+        assert_ne!(reordered, canonical);
     }
 
     #[test]
@@ -2000,8 +2092,69 @@ mod tests {
             assert_eq!(torrent.comment, None, "{key}");
             assert_eq!(torrent.created_by, None, "{key}");
             assert_eq!(torrent.encoding, None, "{key}");
+            assert!(torrent.extra.is_empty(), "{key}");
             assert_eq!(torrent.info_hash_v1(), hash, "{key}");
         }
+    }
+
+    #[test]
+    fn test_unknown_top_level_fields_round_trip() {
+        let data = dict(vec![
+            ("comment", "hi".into()),
+            (
+                "httpseeds",
+                Bencode::List(vec!["http://seed.example/".into()]),
+            ),
+            ("info", v1_info()),
+            ("nodes", Bencode::List(vec![])),
+        ])
+        .encode();
+        let torrent = parse_torrent(&data).unwrap();
+
+        assert_eq!(torrent.extra.len(), 2);
+        assert!(torrent.extra.contains_key(b"nodes".as_slice()));
+        assert_eq!(torrent.to_bencode().encode(), data);
+        assert_eq!(torrent.into_owned().to_bencode().encode(), data);
+    }
+
+    #[test]
+    fn test_recognized_top_level_field_takes_precedence_over_extra() {
+        let data = dict(vec![("comment", "hi".into()), ("info", v1_info())]).encode();
+        let mut torrent = parse_torrent(&data).unwrap();
+        torrent.extra.insert(b"comment".into(), "other".into());
+
+        assert_eq!(torrent.to_bencode().encode(), data);
+    }
+
+    #[test]
+    fn test_parse_torrent_prefix_allows_trailing_data() {
+        let torrent_data = torrent_bytes(&v1_info_with_attr(), None);
+        let info_bytes = v1_info_with_attr().encode();
+        let mut data = torrent_data.clone();
+        data.extend(b"junk");
+
+        let (torrent, end) = crate::parse_torrent_prefix(&data).unwrap();
+
+        assert_eq!(end, torrent_data.len());
+        assert_eq!(torrent.raw_info(), Some(info_bytes.as_slice()));
+        assert_eq!(
+            torrent.info_hash_v1(),
+            Some(Sha1::digest(&info_bytes).into())
+        );
+    }
+
+    #[test]
+    fn test_trailing_data_is_rejected() {
+        let mut data = torrent_bytes(&v1_info(), None);
+        let len = data.len();
+        data.extend(b"junk");
+
+        assert!(matches!(
+            parse_torrent(&data),
+            Err(crate::error::Error::Bencode(
+                crate::bencode::Error::TrailingData(pos)
+            )) if pos == len
+        ));
     }
 
     #[test]

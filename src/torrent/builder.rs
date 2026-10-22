@@ -939,6 +939,7 @@ mod utils {
             created_by: common_fields.created_by,
             encoding: common_fields.encoding,
             meta,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -1552,6 +1553,7 @@ impl TorrentBuilder<state::HasPaths> {
 
 /// Errors that can arise while building torrents.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// An I/O error occurred.
     #[error("IO error: {0}")]

@@ -216,8 +216,12 @@ impl<'a> From<&'a Torrent<'a>> for Bencode<'a> {
     /// The output is a [`Bencode::Dict`] that contains the serialized [`TorrentMeta`] as well as other
     /// optional fields from [`Torrent`] if set. See the `From<&TorrentMeta>` implementation on
     /// [`Bencode`] for more information on how [`TorrentMeta`] is serialized.
+    ///
+    /// The unrecognized fields from [`Torrent::extra`] are inserted as well.
     fn from(torrent: &'a Torrent) -> Self {
         let mut dict: BTreeMap<Cow<'_, [u8]>, Bencode<'_>> = BTreeMap::new();
+        // Inserted first so that the recognized fields take precedence.
+        insert_extra_fields(&mut dict, &torrent.extra);
 
         match &torrent.meta {
             TorrentMeta::V1 { info } => {
@@ -775,10 +779,12 @@ impl<'a> Bencode<'a> {
 /// The parser also provides a defense mechanism against stack overflow attacks by tracking the nesting depth
 /// and checking it against the maximum depth. The maximum depth is configurable using [`Parser::with_max_depth`].
 ///
-/// There is also the shorthand function [`parse_torrent`] that creates a [`Torrent`] instance
-/// from raw data without going through the intermediate steps.
+/// To parse a torrent file, use [`parse_torrent`] or [`parse_torrent_prefix`] instead of
+/// calling [`Torrent::try_from`] on the output of this parser. They also record the original
+/// bytes of the `info` dictionary, which are needed for a correct info hash.
 ///
 /// [`parse_torrent`]: crate::parse_torrent
+/// [`parse_torrent_prefix`]: crate::parse_torrent_prefix
 ///
 /// # Examples
 ///
@@ -792,22 +798,14 @@ impl<'a> Bencode<'a> {
 /// assert_eq!(bencode.encode(), b"l4:cool6:parser2:at4:worke");
 /// ```
 ///
-/// Torrent file parsing and creating a [`Torrent`] instance:
+/// Parsing several values that follow each other:
 ///
-/// ```no_run
-/// # use std::{fs::File, io::Read, error::Error};
-/// # use bitors::{Parser, Torrent};
-/// # fn main() -> Result<(), Box<dyn Error>> {
-/// let mut file = File::open("my_torrent.torrent")?;
-/// let mut data = vec![];
-/// file.read_to_end(&mut data)?;
+/// ```
+/// # use bitors::Parser;
+/// let mut parser = Parser::new(b"i1e4:spam".as_slice());
 ///
-/// let mut parser = Parser::new(&data);
-/// let torrent = Torrent::try_from(parser.parse()?)?;
-///
-/// // Do something else...
-/// # Ok(())
-/// # }
+/// assert_eq!(parser.parse_prefix().unwrap().as_int().unwrap(), 1);
+/// assert_eq!(parser.parse_prefix().unwrap().as_str().unwrap(), "spam");
 /// ```
 #[derive(Debug)]
 pub struct Parser<'a> {
@@ -872,8 +870,44 @@ impl<'a> Parser<'a> {
     ///   be strings.
     /// - [`Error::UnsortedDictKeys`] if a dictionary's keys appeared in a non-sorted order. This is required by
     ///   [BEP 3](https://www.bittorrent.org/beps/bep_0003.html#bencoding).
+    /// - [`Error::TrailingData`] if there were bytes left after the root value. Use
+    ///   [`Parser::parse_prefix`] to allow them.
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
+        let bencode = self.parse_prefix()?;
+        if self.cursor < self.data.len() {
+            return Err(Error::TrailingData(self.cursor));
+        }
+        Ok(bencode)
+    }
+
+    /// Parses a single value starting at the current position and leaves any bytes after it
+    /// unread.
+    ///
+    /// This is useful when bencoded values are followed by other data, for example in a stream.
+    /// [`Parser::position`] returns where the next value starts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use bitors::Parser;
+    /// let mut parser = Parser::new(b"i1ei2e");
+    ///
+    /// assert_eq!(parser.parse_prefix().unwrap().as_int().unwrap(), 1);
+    /// assert_eq!(parser.position(), 3);
+    /// assert_eq!(parser.parse_prefix().unwrap().as_int().unwrap(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Parser::parse`], except that [`Error::TrailingData`] is never returned.
+    pub fn parse_prefix(&mut self) -> Result<Bencode<'a>, Error> {
         self.parse_internal(1)
+    }
+
+    /// Returns the position of the first byte that has not been parsed yet.
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.cursor
     }
 
     /// Returns the raw bytes of the `info` dictionary if it was encountered during parsing, or `None` otherwise.
@@ -1007,6 +1041,7 @@ impl<'a> Parser<'a> {
 
 /// Errors that can arise while parsing using [`Parser`] or working with [`Bencode`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A byte slice in [`Bencode`] cannot be converted to a UTF-8 encoded [`str`].
     #[error("UTF-8 error: {0}")]
@@ -1049,11 +1084,31 @@ pub enum Error {
         /// A short description of the actual type.
         actual: &'static str,
     },
+    /// The data contained bytes after the end of the root value. The value is the position of the
+    /// first trailing byte.
+    #[error("Trailing data at position {0}")]
+    TrailingData(usize),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_trailing_data() {
+        assert!(matches!(
+            Parser::new(b"i1ei2e").parse(),
+            Err(Error::TrailingData(3))
+        ));
+        assert!(matches!(
+            Parser::new(b"4:spamx").parse(),
+            Err(Error::TrailingData(6))
+        ));
+
+        let mut parser = Parser::new(b"i1ejunk");
+        assert_eq!(parser.parse_prefix().unwrap().as_int().unwrap(), 1);
+        assert_eq!(parser.position(), 3);
+    }
 
     #[test]
     fn test_parse_integer() {
